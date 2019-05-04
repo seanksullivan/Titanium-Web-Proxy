@@ -28,15 +28,10 @@ namespace Titanium.Web.Proxy.Models
         internal bool IsSystemHttpsProxy { get; set; }
 
         /// <summary>
-        ///     Generic certificate to use for SSL decryption.
-        /// </summary>
-        public X509Certificate2 GenericCertificate { get; set; }
-
-        /// <summary>
         ///     Intercept tunnel connect request.
         ///     Valid only for explicit endpoints.
         ///     Set the <see cref="TunnelConnectSessionEventArgs.DecryptSsl" /> property to false if this HTTP connect request
-        ///     should'nt be decrypted and instead be relayed.
+        ///     shouldn't be decrypted and instead be relayed.
         /// </summary>
         public event AsyncEventHandler<TunnelConnectSessionEventArgs> BeforeTunnelConnectRequest;
 
@@ -55,7 +50,7 @@ namespace Titanium.Web.Proxy.Models
             }
         }
 
-        internal async Task InvokeBeforeTunnectConnectResponse(ProxyServer proxyServer,
+        internal async Task InvokeBeforeTunnelConnectResponse(ProxyServer proxyServer,
             TunnelConnectSessionEventArgs connectArgs, ExceptionHandler exceptionFunc, bool isClientHello = false)
         {
             if (BeforeTunnelConnectResponse != null)

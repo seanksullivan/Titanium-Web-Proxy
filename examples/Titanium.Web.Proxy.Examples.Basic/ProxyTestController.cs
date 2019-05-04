@@ -16,9 +16,7 @@ namespace Titanium.Web.Proxy.Examples.Basic
     public class ProxyTestController
     {
         private readonly SemaphoreSlim @lock = new SemaphoreSlim(1);
-
         private readonly ProxyServer proxyServer;
-
         private ExplicitProxyEndPoint explicitEndPoint;
 
         public ProxyTestController()
@@ -32,27 +30,13 @@ namespace Titanium.Web.Proxy.Examples.Basic
 
             proxyServer.ExceptionFunc = async exception =>
             {
-                await @lock.WaitAsync();
-
-                try
+                if (exception is ProxyHttpException phex)
                 {
-                        var color = Console.ForegroundColor;
-                        Console.ForegroundColor = ConsoleColor.Red;
-                        if (exception is ProxyHttpException phex)
-                        {
-                            Console.WriteLine(exception.Message + ": " + phex.InnerException?.Message);
-                        }
-                        else
-                        {
-                            Console.WriteLine(exception.Message);
-                        }
-
-                        Console.ForegroundColor = color;
-                    
+                    await writeToConsole(exception.Message + ": " + phex.InnerException?.Message, true);
                 }
-                finally
+                else
                 {
-                    @lock.Release();
+                    await writeToConsole(exception.Message, true);
                 }
             };
             proxyServer.ForwardToUpstreamGateway = true;
@@ -68,8 +52,8 @@ namespace Titanium.Web.Proxy.Examples.Basic
 
         public void StartProxy()
         {
-            proxyServer.BeforeRequest += OnRequest;
-            proxyServer.BeforeResponse += OnResponse;
+            proxyServer.BeforeRequest += onRequest;
+            proxyServer.BeforeResponse += onResponse;
 
             proxyServer.ServerCertificateValidationCallback += OnCertificateValidation;
             proxyServer.ClientCertificateSelectionCallback += OnCertificateSelection;
@@ -79,8 +63,8 @@ namespace Titanium.Web.Proxy.Examples.Basic
             explicitEndPoint = new ExplicitProxyEndPoint(IPAddress.Any, 8000);
 
             // Fired when a CONNECT request is received
-            explicitEndPoint.BeforeTunnelConnectRequest += OnBeforeTunnelConnectRequest;
-            explicitEndPoint.BeforeTunnelConnectResponse += OnBeforeTunnelConnectResponse;
+            explicitEndPoint.BeforeTunnelConnectRequest += onBeforeTunnelConnectRequest;
+            explicitEndPoint.BeforeTunnelConnectResponse += onBeforeTunnelConnectResponse;
 
             // An explicit endpoint is where the client knows about the existence of a proxy
             // So client sends request in a proxy friendly manner
@@ -110,7 +94,7 @@ namespace Titanium.Web.Proxy.Examples.Basic
             // Only explicit proxies can be set as system proxy!
             //proxyServer.SetAsSystemHttpProxy(explicitEndPoint);
             //proxyServer.SetAsSystemHttpsProxy(explicitEndPoint);
-            if(RunTime.IsWindows)
+            if (RunTime.IsWindows)
             {
                 proxyServer.SetAsSystemProxy(explicitEndPoint, ProxyProtocolType.AllHttp);
             }
@@ -118,11 +102,11 @@ namespace Titanium.Web.Proxy.Examples.Basic
 
         public void Stop()
         {
-            explicitEndPoint.BeforeTunnelConnectRequest -= OnBeforeTunnelConnectRequest;
-            explicitEndPoint.BeforeTunnelConnectResponse -= OnBeforeTunnelConnectResponse;
+            explicitEndPoint.BeforeTunnelConnectRequest -= onBeforeTunnelConnectRequest;
+            explicitEndPoint.BeforeTunnelConnectResponse -= onBeforeTunnelConnectResponse;
 
-            proxyServer.BeforeRequest -= OnRequest;
-            proxyServer.BeforeResponse -= OnResponse;
+            proxyServer.BeforeRequest -= onRequest;
+            proxyServer.BeforeResponse -= onResponse;
             proxyServer.ServerCertificateValidationCallback -= OnCertificateValidation;
             proxyServer.ClientCertificateSelectionCallback -= OnCertificateSelection;
 
@@ -132,10 +116,10 @@ namespace Titanium.Web.Proxy.Examples.Basic
             //proxyServer.CertificateManager.RemoveTrustedRootCertificates();
         }
 
-        private async Task OnBeforeTunnelConnectRequest(object sender, TunnelConnectSessionEventArgs e)
+        private async Task onBeforeTunnelConnectRequest(object sender, TunnelConnectSessionEventArgs e)
         {
-            string hostname = e.WebSession.Request.RequestUri.Host;
-            await WriteToConsole("Tunnel to: " + hostname);
+            string hostname = e.HttpClient.Request.RequestUri.Host;
+            await writeToConsole("Tunnel to: " + hostname);
 
             if (hostname.Contains("dropbox.com"))
             {
@@ -146,35 +130,35 @@ namespace Titanium.Web.Proxy.Examples.Basic
             }
         }
 
-        private Task OnBeforeTunnelConnectResponse(object sender, TunnelConnectSessionEventArgs e)
+        private Task onBeforeTunnelConnectResponse(object sender, TunnelConnectSessionEventArgs e)
         {
             return Task.FromResult(false);
         }
 
         // intecept & cancel redirect or update requests
-        private async Task OnRequest(object sender, SessionEventArgs e)
+        private async Task onRequest(object sender, SessionEventArgs e)
         {
-            await WriteToConsole("Active Client Connections:" + ((ProxyServer)sender).ClientConnectionCount);
-            await WriteToConsole(e.WebSession.Request.Url);
+            await writeToConsole("Active Client Connections:" + ((ProxyServer)sender).ClientConnectionCount);
+            await writeToConsole(e.HttpClient.Request.Url);
 
             // store it in the UserData property
             // It can be a simple integer, Guid, or any type
             //e.UserData = new CustomUserData()
             //{
-            //    RequestHeaders = e.WebSession.Request.Headers,
-            //    RequestBody = e.WebSession.Request.HasBody ? e.WebSession.Request.Body:null,
-            //    RequestBodyString = e.WebSession.Request.HasBody? e.WebSession.Request.BodyString:null
+            //    RequestHeaders = e.HttpClient.Request.Headers,
+            //    RequestBody = e.HttpClient.Request.HasBody ? e.HttpClient.Request.Body:null,
+            //    RequestBodyString = e.HttpClient.Request.HasBody? e.HttpClient.Request.BodyString:null
             //};
 
             ////This sample shows how to get the multipart form data headers
-            //if (e.WebSession.Request.Host == "mail.yahoo.com" && e.WebSession.Request.IsMultipartFormData)
+            //if (e.HttpClient.Request.Host == "mail.yahoo.com" && e.HttpClient.Request.IsMultipartFormData)
             //{
             //    e.MultipartRequestPartSent += MultipartRequestPartSent;
             //}
 
             // To cancel a request with a custom HTML content
             // Filter URL
-            //if (e.WebSession.Request.RequestUri.AbsoluteUri.Contains("yahoo.com"))
+            //if (e.HttpClient.Request.RequestUri.AbsoluteUri.Contains("yahoo.com"))
             //{ 
             //    e.Ok("<!DOCTYPE html>" +
             //          "<html><body><h1>" +
@@ -186,31 +170,31 @@ namespace Titanium.Web.Proxy.Examples.Basic
             //} 
 
             ////Redirect example
-            //if (e.WebSession.Request.RequestUri.AbsoluteUri.Contains("wikipedia.org"))
+            //if (e.HttpClient.Request.RequestUri.AbsoluteUri.Contains("wikipedia.org"))
             //{ 
             //   e.Redirect("https://www.paypal.com");
             //} 
         }
 
         // Modify response
-        private async Task MultipartRequestPartSent(object sender, MultipartRequestPartSentEventArgs e)
+        private async Task multipartRequestPartSent(object sender, MultipartRequestPartSentEventArgs e)
         {
             var session = (SessionEventArgs)sender;
-            await WriteToConsole("Multipart form data headers:");
+            await writeToConsole("Multipart form data headers:");
             foreach (var header in e.Headers)
             {
-                await WriteToConsole(header.ToString());
+                await writeToConsole(header.ToString());
             }
         }
 
-        private async Task OnResponse(object sender, SessionEventArgs e)
+        private async Task onResponse(object sender, SessionEventArgs e)
         {
-            await WriteToConsole("Active Server Connections:" + ((ProxyServer)sender).ServerConnectionCount);
+            await writeToConsole("Active Server Connections:" + ((ProxyServer)sender).ServerConnectionCount);
 
-            string ext = System.IO.Path.GetExtension(e.WebSession.Request.RequestUri.AbsolutePath);
+            string ext = System.IO.Path.GetExtension(e.HttpClient.Request.RequestUri.AbsolutePath);
 
             //access user data set in request to do something with it
-            //var userData = e.WebSession.UserData as CustomUserData;
+            //var userData = e.HttpClient.UserData as CustomUserData;
 
             //if (ext == ".gif" || ext == ".png" || ext == ".jpg")
             //{ 
@@ -223,21 +207,21 @@ namespace Titanium.Web.Proxy.Examples.Basic
             //                                           "</html>");
 
             //    var response = new OkResponse(btBody);
-            //    response.HttpVersion = e.WebSession.Request.HttpVersion;
+            //    response.HttpVersion = e.HttpClient.Request.HttpVersion;
 
             //    e.Respond(response);
             //    e.TerminateServerConnection();
             //} 
 
             //// print out process id of current session
-            ////WriteToConsole($"PID: {e.WebSession.ProcessId.Value}");
+            ////WriteToConsole($"PID: {e.HttpClient.ProcessId.Value}");
 
             ////if (!e.ProxySession.Request.Host.Equals("medeczane.sgk.gov.tr")) return;
-            //if (e.WebSession.Request.Method == "GET" || e.WebSession.Request.Method == "POST")
+            //if (e.HttpClient.Request.Method == "GET" || e.HttpClient.Request.Method == "POST")
             //{ 
-            //    if (e.WebSession.Response.StatusCode == (int)HttpStatusCode.OK)
+            //    if (e.HttpClient.Response.StatusCode == (int)HttpStatusCode.OK)
             //    {
-            //        if (e.WebSession.Response.ContentType != null && e.WebSession.Response.ContentType.Trim().ToLower().Contains("text/html"))
+            //        if (e.HttpClient.Response.ContentType != null && e.HttpClient.Response.ContentType.Trim().ToLower().Contains("text/html"))
             //        {
             //            var bodyBytes = await e.GetResponseBody();
             //            await e.SetResponseBody(bodyBytes);
@@ -277,23 +261,29 @@ namespace Titanium.Web.Proxy.Examples.Basic
             return Task.FromResult(0);
         }
 
-        private async Task WriteToConsole(string message)
+        private async Task writeToConsole(string message, bool useRedColor = false)
         {
             await @lock.WaitAsync();
 
-            try
+            if (useRedColor)
+            {
+                ConsoleColor existing = Console.ForegroundColor;
+                Console.ForegroundColor = ConsoleColor.Red;
+                Console.WriteLine(message);
+                Console.ForegroundColor = existing;
+            }
+            else
             {
                 Console.WriteLine(message);
             }
-            finally
-            {
-                @lock.Release();
-            }
+
+            @lock.Release();
+
         }
 
         ///// <summary>
         ///// User data object as defined by user.
-        ///// User data can be set to each SessionEventArgs.WebSession.UserData property
+        ///// User data can be set to each SessionEventArgs.HttpClient.UserData property
         ///// </summary>
         //public class CustomUserData
         //{

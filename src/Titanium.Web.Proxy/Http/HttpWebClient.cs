@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.IO;
 using System.Net;
 using System.Text;
@@ -17,16 +17,16 @@ namespace Titanium.Web.Proxy.Http
     /// </summary>
     public class HttpWebClient
     {
-        internal HttpWebClient(Request request = null, Response response = null)
+        internal HttpWebClient(Request request)
         {
             Request = request ?? new Request();
-            Response = response ?? new Response();
+            Response = new Response();
         }
 
         /// <summary>
         ///     Connection to server
         /// </summary>
-        internal TcpServerConnection ServerConnection { get; set; }
+        internal TcpServerConnection Connection { get; set; }
 
         /// <summary>
         ///     Should we close the server connection at the end of this HTTP request/response session.
@@ -81,7 +81,7 @@ namespace Titanium.Web.Proxy.Http
         internal void SetConnection(TcpServerConnection serverConnection)
         {
             serverConnection.LastAccess = DateTime.Now;
-            ServerConnection = serverConnection;
+            Connection = serverConnection;
         }
 
         /// <summary>
@@ -91,22 +91,22 @@ namespace Titanium.Web.Proxy.Http
         internal async Task SendRequest(bool enable100ContinueBehaviour, bool isTransparent,
             CancellationToken cancellationToken)
         {
-            var upstreamProxy = ServerConnection.UpStreamProxy;
+            var upstreamProxy = Connection.UpStreamProxy;
 
-            bool useUpstreamProxy = upstreamProxy != null && ServerConnection.IsHttps == false;
+            bool useUpstreamProxy = upstreamProxy != null && Connection.IsHttps == false;
 
-            var writer = ServerConnection.StreamWriter;
+            var writer = Connection.StreamWriter;
 
             // prepare the request & headers
             await writer.WriteLineAsync(Request.CreateRequestLine(Request.Method,
-                useUpstreamProxy || isTransparent ? Request.OriginalUrl : Request.RequestUri.PathAndQuery,
+                useUpstreamProxy || isTransparent ? Request.RequestUriString : Request.RequestUri.PathAndQuery,
                 Request.HttpVersion), cancellationToken);
 
             var headerBuilder = new StringBuilder();
             
             // Send Authentication to Upstream proxy if needed
             if (!isTransparent && upstreamProxy != null
-                               && ServerConnection.IsHttps == false
+                               && Connection.IsHttps == false
                                && !string.IsNullOrEmpty(upstreamProxy.UserName)
                                && upstreamProxy.Password != null)
             {
@@ -127,40 +127,18 @@ namespace Titanium.Web.Proxy.Http
             
             await writer.WriteAsync(headerBuilder.ToString(), cancellationToken);
 
-            if (enable100ContinueBehaviour)
+            if (enable100ContinueBehaviour && Request.ExpectContinue)
             {
-                if (Request.ExpectContinue)
+                // wait for expectation response from server
+                await ReceiveResponse(cancellationToken);
+
+                if (Response.StatusCode == (int)HttpStatusCode.Continue)
                 {
-                    string httpStatus;
-                    try
-                    {
-                        httpStatus = await ServerConnection.Stream.ReadLineAsync(cancellationToken);
-                        if (httpStatus == null)
-                        {
-                            throw new ServerConnectionException("Server connection was closed.");
-                        }
-                    }
-                    catch (Exception e) when (!(e is ServerConnectionException))
-                    {
-                        throw new ServerConnectionException("Server connection was closed.");
-                    }
-
-                    Response.ParseResponseLine(httpStatus, out _, out int responseStatusCode,
-                        out string responseStatusDescription);
-
-                    // find if server is willing for expect continue
-                    if (responseStatusCode == (int)HttpStatusCode.Continue
-                        && responseStatusDescription.EqualsIgnoreCase("continue"))
-                    {
-                        Request.Is100Continue = true;
-                        await ServerConnection.Stream.ReadLineAsync(cancellationToken);
-                    }
-                    else if (responseStatusCode == (int)HttpStatusCode.ExpectationFailed
-                             && responseStatusDescription.EqualsIgnoreCase("expectation failed"))
-                    {
-                        Request.ExpectationFailed = true;
-                        await ServerConnection.Stream.ReadLineAsync(cancellationToken);
-                    }
+                    Request.ExpectationSucceeded = true;
+                }
+                else
+                {
+                    Request.ExpectationFailed = true;
                 }
             }
         }
@@ -180,7 +158,7 @@ namespace Titanium.Web.Proxy.Http
             string httpStatus;
             try
             {
-                httpStatus = await ServerConnection.Stream.ReadLineAsync(cancellationToken);
+                httpStatus = await Connection.Stream.ReadLineAsync(cancellationToken);
                 if (httpStatus == null)
                 {
                     throw new ServerConnectionException("Server connection was closed.");
@@ -193,7 +171,7 @@ namespace Titanium.Web.Proxy.Http
 
             if (httpStatus == string.Empty)
             {
-                httpStatus = await ServerConnection.Stream.ReadLineAsync(cancellationToken);
+                httpStatus = await Connection.Stream.ReadLineAsync(cancellationToken);
             }
 
             Response.ParseResponseLine(httpStatus, out var version, out int statusCode, out string statusDescription);
@@ -202,35 +180,8 @@ namespace Titanium.Web.Proxy.Http
             Response.StatusCode = statusCode;
             Response.StatusDescription = statusDescription;
 
-            // For HTTP 1.1 comptibility server may send expect-continue even if not asked for it in request
-            if (Response.StatusCode == (int)HttpStatusCode.Continue
-                && Response.StatusDescription.EqualsIgnoreCase("continue"))
-            {
-                // Read the next line after 100-continue 
-                Response.Is100Continue = true;
-                Response.StatusCode = 0;
-                await ServerConnection.Stream.ReadLineAsync(cancellationToken);
-
-                // now receive response
-                await ReceiveResponse(cancellationToken);
-                return;
-            }
-
-            if (Response.StatusCode == (int)HttpStatusCode.ExpectationFailed
-                && Response.StatusDescription.EqualsIgnoreCase("expectation failed"))
-            {
-                // read next line after expectation failed response
-                Response.ExpectationFailed = true;
-                Response.StatusCode = 0;
-                await ServerConnection.Stream.ReadLineAsync(cancellationToken);
-
-                // now receive response 
-                await ReceiveResponse(cancellationToken);
-                return;
-            }
-
             // Read the response headers in to unique and non-unique header collections
-            await HeaderParser.ReadHeaders(ServerConnection.Stream, Response.Headers, cancellationToken);
+            await HeaderParser.ReadHeaders(Connection.Stream, Response.Headers, cancellationToken);
         }
 
         /// <summary>
@@ -238,7 +189,7 @@ namespace Titanium.Web.Proxy.Http
         /// </summary>
         internal void FinishSession()
         {
-            ServerConnection = null;
+            Connection = null;
 
             ConnectRequest?.FinishSession();
             Request?.FinishSession();

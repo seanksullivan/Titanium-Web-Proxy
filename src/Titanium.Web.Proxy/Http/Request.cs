@@ -14,6 +14,8 @@ namespace Titanium.Web.Proxy.Http
     [TypeConverter(typeof(ExpandableObjectConverter))]
     public class Request : RequestResponseBase
     {
+        private string originalUrl;
+
         /// <summary>
         ///     Request Method.
         /// </summary>
@@ -32,7 +34,20 @@ namespace Titanium.Web.Proxy.Http
         /// <summary>
         ///     The original request Url.
         /// </summary>
-        public string OriginalUrl { get; set; }
+        public string OriginalUrl
+        {
+            get => originalUrl;
+            internal set
+            {
+                originalUrl = value;
+                RequestUriString = value;
+            }
+        }
+
+        /// <summary>
+        ///     The request uri as it is in the HTTP header
+        /// </summary>
+        public string RequestUriString { get; set; }
 
         /// <summary>
         ///     Has request body?
@@ -123,12 +138,12 @@ namespace Titanium.Web.Proxy.Http
         }
 
         /// <summary>
-        ///     Did server responsed positively for 100 continue request?
+        ///     Did server respond positively for 100 continue request?
         /// </summary>
-        public bool Is100Continue { get; internal set; }
+        public bool ExpectationSucceeded { get; internal set; }
 
         /// <summary>
-        ///     Did server responsed negatively for the request for 100 continue?
+        ///     Did server respond negatively for 100 continue request?
         /// </summary>
         public bool ExpectationFailed { get; internal set; }
 
@@ -140,7 +155,7 @@ namespace Titanium.Web.Proxy.Http
             get
             {
                 var sb = new StringBuilder();
-                sb.Append($"{CreateRequestLine(Method, OriginalUrl, HttpVersion)}{ProxyConstants.NewLine}");
+                sb.Append($"{CreateRequestLine(Method, RequestUriString, HttpVersion)}{ProxyConstants.NewLine}");
                 foreach (var header in Headers)
                 {
                     sb.Append($"{header.ToString()}{ProxyConstants.NewLine}");
