@@ -1,6 +1,6 @@
 ﻿using System;
 using System.Net;
-using StreamExtended;
+using Titanium.Web.Proxy.StreamExtended;
 
 namespace Titanium.Web.Proxy.Http
 {
@@ -9,7 +9,7 @@ namespace Titanium.Web.Proxy.Http
     /// </summary>
     public class ConnectResponse : Response
     {
-        public ServerHelloInfo ServerHelloInfo { get; set; }
+        public ServerHelloInfo? ServerHelloInfo { get; set; }
 
         /// <summary>
         ///     Creates a successful CONNECT response

@@ -1,25 +1,26 @@
-﻿using System;
-using System.Threading;
+﻿using System.Threading;
+using Titanium.Web.Proxy.Network.Tcp;
 
 namespace Titanium.Web.Proxy.EventArguments
 {
     /// <summary>
     ///     This is used in transparent endpoint before authenticating client.
     /// </summary>
-    public class BeforeSslAuthenticateEventArgs : EventArgs
+    public class BeforeSslAuthenticateEventArgs : ProxyEventArgsBase
     {
         internal readonly CancellationTokenSource TaskCancellationSource;
 
-        internal BeforeSslAuthenticateEventArgs(CancellationTokenSource taskCancellationSource)
+        internal BeforeSslAuthenticateEventArgs(TcpClientConnection clientConnection, CancellationTokenSource taskCancellationSource, string sniHostName) : base(clientConnection)
         {
             TaskCancellationSource = taskCancellationSource;
+            SniHostName = sniHostName;
         }
 
         /// <summary>
         ///     The server name indication hostname if available. Otherwise the generic certificate hostname of
         ///     TransparentEndPoint.
         /// </summary>
-        public string SniHostName { get; internal set; }
+        public string SniHostName { get; }
 
         /// <summary>
         ///     Should we decrypt the SSL request?

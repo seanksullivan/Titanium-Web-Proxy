@@ -1,7 +1,6 @@
 ﻿using System;
 using System.Linq;
 using System.Net;
-using System.Net.NetworkInformation;
 using System.Net.Sockets;
 
 namespace Titanium.Web.Proxy.Helpers
@@ -41,7 +40,7 @@ namespace Titanium.Web.Proxy.Helpers
                 return true;
             }
 
-            //if hostname matches local host name
+            // if hostname matches local host name
             if (hostName.Equals(localhostName, StringComparison.OrdinalIgnoreCase))
             {
                 return true;
@@ -54,7 +53,7 @@ namespace Titanium.Web.Proxy.Helpers
             }
 
             try
-            {              
+            {
                 // do reverse DNS lookup even if hostName is an IP address
                 var hostEntry = Dns.GetHostEntry(hostName);
                 // if DNS resolved hostname matches local DNS name,

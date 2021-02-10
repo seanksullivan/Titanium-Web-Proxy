@@ -7,8 +7,6 @@ using System.Security.Authentication;
 using System.Security.Cryptography.X509Certificates;
 using System.Threading;
 using System.Threading.Tasks;
-using StreamExtended;
-using StreamExtended.Network;
 using Titanium.Web.Proxy.EventArguments;
 using Titanium.Web.Proxy.Extensions;
 using Titanium.Web.Proxy.Helpers;
@@ -16,6 +14,7 @@ using Titanium.Web.Proxy.Helpers.WinHttp;
 using Titanium.Web.Proxy.Models;
 using Titanium.Web.Proxy.Network;
 using Titanium.Web.Proxy.Network.Tcp;
+using Titanium.Web.Proxy.StreamExtended.BufferPool;
 
 namespace Titanium.Web.Proxy
 {
@@ -32,6 +31,10 @@ namespace Titanium.Web.Proxy
         internal static readonly string UriSchemeHttp = Uri.UriSchemeHttp;
         internal static readonly string UriSchemeHttps = Uri.UriSchemeHttps;
 
+        internal static ByteString UriSchemeHttp8 = (ByteString)UriSchemeHttp;
+        internal static ByteString UriSchemeHttps8 = (ByteString)UriSchemeHttps;
+
+
         /// <summary>
         ///     A default exception log func.
         /// </summary>
@@ -45,7 +48,7 @@ namespace Titanium.Web.Proxy
         /// <summary>
         ///     Backing field for exposed public property.
         /// </summary>
-        private ExceptionHandler exceptionFunc;
+        private ExceptionHandler? exceptionFunc;
 
         /// <summary>
         ///     Backing field for exposed public property.
@@ -55,9 +58,9 @@ namespace Titanium.Web.Proxy
         /// <summary>
         ///     Upstream proxy manager.
         /// </summary>
-        private WinHttpWebProxyFinder systemProxyResolver;
+        private WinHttpWebProxyFinder? systemProxyResolver;
 
-        
+
         /// <inheritdoc />
         /// <summary>
         ///     Initializes a new instance of ProxyServer class with provided parameters.
@@ -91,16 +94,11 @@ namespace Titanium.Web.Proxy
         ///     Should we attempt to trust certificates with elevated permissions by
         ///     prompting for UAC if required?
         /// </param>
-        public ProxyServer(string rootCertificateName, string rootCertificateIssuerName,
+        public ProxyServer(string? rootCertificateName, string? rootCertificateIssuerName,
             bool userTrustRootCertificate = true, bool machineTrustRootCertificate = false,
             bool trustRootCertificateAsAdmin = false)
         {
-
-            if (BufferPool == null)
-            {
-                BufferPool = new DefaultBufferPool();
-            }
-
+            BufferPool = new DefaultBufferPool();
             ProxyEndPoints = new List<ProxyEndPoint>();
             tcpConnectionFactory = new TcpConnectionFactory(this);
             if (RunTime.IsWindows && !RunTime.IsUwpOnWindows)
@@ -120,9 +118,11 @@ namespace Titanium.Web.Proxy
         /// <summary>
         ///     Manage system proxy settings.
         /// </summary>
-        private SystemProxyManager systemProxySettingsManager { get; }
+        private SystemProxyManager? systemProxySettingsManager { get; }
 
-        //Number of exception retries when connection pool is enabled.
+        /// <summary>
+        ///     Number of exception retries when connection pool is enabled.
+        /// </summary>
         private int retries => EnableConnectionPool ? MaxCachedConnections : 0;
 
         /// <summary>
@@ -144,7 +144,7 @@ namespace Titanium.Web.Proxy
         ///     Defaults to false.
         /// </summary>
         public bool EnableWinAuth { get; set; }
-        
+
         /// <summary>
         ///     Enable disable HTTP/2 support.
         ///     Warning: HTTP/2 support is very limited
@@ -167,8 +167,12 @@ namespace Titanium.Web.Proxy
         public bool Enable100ContinueBehaviour { get; set; }
 
         /// <summary>
-        ///     Should we enable experimental server connection pool?
-        ///     Defaults to true.
+        ///     Should we enable server connection pool. Defaults to true.
+        ///     When you enable connection pooling, instead of creating a new TCP connection to server for each client TCP connection, 
+        ///     we check if a server connection is available in our cached pool. If it is available in our pool, 
+        ///     created from earlier requests to the same server, we will reuse those idle connections. 
+        ///     There is also a ConnectionTimeOutSeconds parameter, which determine the eviction time for inactive server connections. 
+        ///     This will help to reduce TCP connection establishment cost, both the wall clock time and CPU cycles. 
         /// </summary>
         public bool EnableConnectionPool { get; set; } = true;
 
@@ -189,17 +193,17 @@ namespace Titanium.Web.Proxy
         public bool NoDelay { get; set; } = true;
 
         /// <summary>
-        ///     Buffer size in bytes used throughout this proxy.
-        ///     Default value is 8192 bytes.
-        /// </summary>
-        public int BufferSize { get; set; } = 8192;
-
-        /// <summary>
         ///     Seconds client/server connection are to be kept alive when waiting for read/write to complete.
         ///     This will also determine the pool eviction time when connection pool is enabled.
         ///     Default value is 60 seconds.
         /// </summary>
         public int ConnectionTimeOutSeconds { get; set; } = 60;
+
+        /// <summary>
+        ///     Seconds server connection are to wait for connection to be established.
+        ///     Default value is 20 seconds.
+        /// </summary>
+        public int ConnectTimeOutSeconds { get; set; } = 20;
 
         /// <summary>
         ///     Maximum number of concurrent connections per remote host in cache.
@@ -238,16 +242,15 @@ namespace Titanium.Web.Proxy
         /// <summary>
         ///     List of supported Ssl versions.
         /// </summary>
-        public SslProtocols SupportedSslProtocols { get; set; } =
-#if NET45
-            SslProtocols.Ssl3 |
-#endif
-            SslProtocols.Tls | SslProtocols.Tls11 | SslProtocols.Tls12;
+#pragma warning disable 618
+        public SslProtocols SupportedSslProtocols { get; set; } = SslProtocols.Ssl3 | SslProtocols.Tls | SslProtocols.Tls11 | SslProtocols.Tls12;
+#pragma warning restore 618
 
         /// <summary>
         ///     The buffer pool used throughout this proxy instance.
         ///     Set custom implementations by implementing this interface.
         ///     By default this uses DefaultBufferPool implementation available in StreamExtended library package.
+        ///     Buffer size should be at least 10 bytes.
         /// </summary>
         public IBufferPool BufferPool { get; set; }
 
@@ -259,18 +262,18 @@ namespace Titanium.Web.Proxy
         /// <summary>
         ///     External proxy used for Http requests.
         /// </summary>
-        public ExternalProxy UpStreamHttpProxy { get; set; }
+        public IExternalProxy? UpStreamHttpProxy { get; set; }
 
         /// <summary>
         ///     External proxy used for Https requests.
         /// </summary>
-        public ExternalProxy UpStreamHttpsProxy { get; set; }
+        public IExternalProxy? UpStreamHttpsProxy { get; set; }
 
         /// <summary>
         ///     Local adapter/NIC endpoint where proxy makes request via.
         ///     Defaults via any IP addresses of this machine.
         /// </summary>
-        public IPEndPoint UpStreamEndPoint { get; set; } = new IPEndPoint(IPAddress.Any, 0);
+        public IPEndPoint? UpStreamEndPoint { get; set; }
 
         /// <summary>
         ///     A list of IpAddress and port this proxy is listening to.
@@ -281,7 +284,13 @@ namespace Titanium.Web.Proxy
         ///     A callback to provide authentication credentials for up stream proxy this proxy is using for HTTP(S) requests.
         ///     User should return the ExternalProxy object with valid credentials.
         /// </summary>
-        public Func<SessionEventArgsBase, Task<ExternalProxy>> GetCustomUpStreamProxyFunc { get; set; }
+        public Func<SessionEventArgsBase, Task<IExternalProxy?>>? GetCustomUpStreamProxyFunc { get; set; }
+
+        /// <summary>
+        ///     A callback to provide a chance for an upstream proxy failure to be handled by a new upstream proxy.
+        ///     User should return the ExternalProxy object with valid credentials or null.
+        /// </summary>
+        public Func<SessionEventArgsBase, Task<IExternalProxy?>>? CustomUpStreamProxyFailureFunc { get; set; }
 
         /// <summary>
         ///     Callback for error events in this proxy instance.
@@ -301,14 +310,14 @@ namespace Titanium.Web.Proxy
         ///     Parameters are username and password as provided by client.
         ///     Should return true for successful authentication.
         /// </summary>
-        public Func<SessionEventArgsBase, string, string, Task<bool>> ProxyBasicAuthenticateFunc { get; set; }
+        public Func<SessionEventArgsBase, string, string, Task<bool>>? ProxyBasicAuthenticateFunc { get; set; }
 
         /// <summary>
         ///     A pluggable callback to authenticate clients by scheme instead of requiring basic authentication through ProxyBasicAuthenticateFunc.
         ///     Parameters are current working session, schemeType, and token as provided by a calling client.
         ///     Should return success for successful authentication, continuation if the package requests, or failure.
         /// </summary>
-        public Func<SessionEventArgsBase, string, string, Task<ProxyAuthenticationContext>> ProxySchemeAuthenticateFunc { get; set; }
+        public Func<SessionEventArgsBase, string, string, Task<ProxyAuthenticationContext>>? ProxySchemeAuthenticateFunc { get; set; }
 
         /// <summary>
         ///     A collection of scheme types, e.g. basic, NTLM, Kerberos, Negotiate, to return if scheme authentication is required.
@@ -319,47 +328,47 @@ namespace Titanium.Web.Proxy
         /// <summary>
         ///     Event occurs when client connection count changed.
         /// </summary>
-        public event EventHandler ClientConnectionCountChanged;
+        public event EventHandler? ClientConnectionCountChanged;
 
         /// <summary>
         ///     Event occurs when server connection count changed.
         /// </summary>
-        public event EventHandler ServerConnectionCountChanged;
+        public event EventHandler? ServerConnectionCountChanged;
 
         /// <summary>
         ///     Event to override the default verification logic of remote SSL certificate received during authentication.
         /// </summary>
-        public event AsyncEventHandler<CertificateValidationEventArgs> ServerCertificateValidationCallback;
+        public event AsyncEventHandler<CertificateValidationEventArgs>? ServerCertificateValidationCallback;
 
         /// <summary>
         ///     Event to override client certificate selection during mutual SSL authentication.
         /// </summary>
-        public event AsyncEventHandler<CertificateSelectionEventArgs> ClientCertificateSelectionCallback;
+        public event AsyncEventHandler<CertificateSelectionEventArgs>? ClientCertificateSelectionCallback;
 
         /// <summary>
         ///     Intercept request event to server.
         /// </summary>
-        public event AsyncEventHandler<SessionEventArgs> BeforeRequest;
+        public event AsyncEventHandler<SessionEventArgs>? BeforeRequest;
 
         /// <summary>
         ///     Intercept response event from server.
         /// </summary>
-        public event AsyncEventHandler<SessionEventArgs> BeforeResponse;
+        public event AsyncEventHandler<SessionEventArgs>? BeforeResponse;
 
         /// <summary>
         ///     Intercept after response event from server.
         /// </summary>
-        public event AsyncEventHandler<SessionEventArgs> AfterResponse;
+        public event AsyncEventHandler<SessionEventArgs>? AfterResponse;
 
         /// <summary>
         ///     Customize TcpClient used for client connection upon create.
         /// </summary>
-        public event AsyncEventHandler<TcpClient> OnClientConnectionCreate;
+        public event AsyncEventHandler<Socket>? OnClientConnectionCreate;
 
         /// <summary>
         ///     Customize TcpClient used for server connection upon create.
         /// </summary>
-        public event AsyncEventHandler<TcpClient> OnServerConnectionCreate;
+        public event AsyncEventHandler<Socket>? OnServerConnectionCreate;
 
         /// <summary>
         /// Customize the minimum ThreadPool size (increase it on a server)
@@ -431,10 +440,10 @@ namespace Titanium.Web.Proxy
         /// <param name="protocolType">The proxy protocol type.</param>
         public void SetAsSystemProxy(ExplicitProxyEndPoint endPoint, ProxyProtocolType protocolType)
         {
-            if (!RunTime.IsWindows)
+            if (systemProxySettingsManager == null)
             {
                 throw new NotSupportedException(@"Setting system proxy settings are only supported in Windows.
-                            Please manually confugure you operating system to use this proxy's port and address.");
+                            Please manually configure you operating system to use this proxy's port and address.");
             }
 
             validateEndPointAsSystemProxy(endPoint);
@@ -483,7 +492,7 @@ namespace Titanium.Web.Proxy
                 endPoint.IsSystemHttpsProxy = true;
             }
 
-            string proxyType = null;
+            string? proxyType = null;
             switch (protocolType)
             {
                 case ProxyProtocolType.Http:
@@ -521,14 +530,28 @@ namespace Titanium.Web.Proxy
         }
 
         /// <summary>
+        ///     Restores the original proxy settings.
+        /// </summary>
+        public void RestoreOriginalProxySettings()
+        {
+            if (systemProxySettingsManager == null)
+            {
+                throw new NotSupportedException(@"Setting system proxy settings are only supported in Windows.
+                            Please manually configure your operating system to use this proxy's port and address.");
+            }
+
+            systemProxySettingsManager.RestoreOriginalSettings();
+        }
+
+        /// <summary>
         ///     Clear the specified proxy setting for current machine.
         /// </summary>
         public void DisableSystemProxy(ProxyProtocolType protocolType)
         {
-            if (!RunTime.IsWindows)
+            if (systemProxySettingsManager == null)
             {
                 throw new NotSupportedException(@"Setting system proxy settings are only supported in Windows.
-                            Please manually confugure you operating system to use this proxy's port and address.");
+                            Please manually configure your operating system to use this proxy's port and address.");
             }
 
             systemProxySettingsManager.RemoveProxy(protocolType);
@@ -539,7 +562,7 @@ namespace Titanium.Web.Proxy
         /// </summary>
         public void DisableAllSystemProxies()
         {
-            if (!RunTime.IsWindows)
+            if (systemProxySettingsManager == null)
             {
                 throw new NotSupportedException(@"Setting system proxy settings are only supported in Windows.
                             Please manually confugure you operating system to use this proxy's port and address.");
@@ -570,7 +593,7 @@ namespace Titanium.Web.Proxy
             if (systemProxySettingsManager != null && RunTime.IsWindows && !RunTime.IsUwpOnWindows)
             {
                 var proxyInfo = systemProxySettingsManager.GetProxyInfoFromRegistry();
-                if (proxyInfo.Proxies != null)
+                if (proxyInfo?.Proxies != null)
                 {
                     var protocolToRemove = ProxyProtocolType.None;
                     foreach (var proxy in proxyInfo.Proxies.Values)
@@ -618,7 +641,7 @@ namespace Titanium.Web.Proxy
                 throw new Exception("Proxy is not running.");
             }
 
-            if (RunTime.IsWindows && !RunTime.IsUwpOnWindows)
+            if (systemProxySettingsManager != null)
             {
                 bool setAsSystemProxy = ProxyEndPoints.OfType<ExplicitProxyEndPoint>()
                     .Any(x => x.IsSystemHttpProxy || x.IsSystemHttpsProxy);
@@ -650,8 +673,7 @@ namespace Titanium.Web.Proxy
         {
             endPoint.Listener = new TcpListener(endPoint.IpAddress, endPoint.Port);
 
-            //linux/macOS has a bug with socket reuse in .net core.
-            if (ReuseSocket && RunTime.IsWindows)
+            if (ReuseSocket && RunTime.IsSocketReuseAvailable)
             {
                 endPoint.Listener.Server.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.ReuseAddress, true);
             }
@@ -663,7 +685,7 @@ namespace Titanium.Web.Proxy
                 endPoint.Port = ((IPEndPoint)endPoint.Listener.LocalEndpoint).Port;
 
                 // accept clients asynchronously
-                endPoint.Listener.BeginAcceptTcpClient(onAcceptConnection, endPoint);
+                endPoint.Listener.BeginAcceptSocket(onAcceptConnection, endPoint);
             }
             catch (SocketException ex)
             {
@@ -686,7 +708,7 @@ namespace Titanium.Web.Proxy
                 throw new ArgumentNullException(nameof(endPoint));
             }
 
-            if (ProxyEndPoints.Contains(endPoint) == false)
+            if (!ProxyEndPoints.Contains(endPoint))
             {
                 throw new Exception("Cannot set endPoints not added to proxy as system proxy");
             }
@@ -702,9 +724,9 @@ namespace Titanium.Web.Proxy
         /// </summary>
         /// <param name="sessionEventArgs">The session.</param>
         /// <returns>The external proxy as task result.</returns>
-        private Task<ExternalProxy> getSystemUpStreamProxy(SessionEventArgsBase sessionEventArgs)
+        private Task<IExternalProxy?> getSystemUpStreamProxy(SessionEventArgsBase sessionEventArgs)
         {
-            var proxy = systemProxyResolver.GetProxy(sessionEventArgs.HttpClient.Request.RequestUri);
+            var proxy = systemProxyResolver!.GetProxy(sessionEventArgs.HttpClient.Request.RequestUri);
             return Task.FromResult(proxy);
         }
 
@@ -715,12 +737,12 @@ namespace Titanium.Web.Proxy
         {
             var endPoint = (ProxyEndPoint)asyn.AsyncState;
 
-            TcpClient tcpClient = null;
+            Socket? tcpClient = null;
 
             try
             {
                 // based on end point type call appropriate request handlers
-                tcpClient = endPoint.Listener.EndAcceptTcpClient(asyn);
+                tcpClient = endPoint.Listener!.EndAcceptSocket(asyn);
                 tcpClient.NoDelay = NoDelay;
             }
             catch (ObjectDisposedException)
@@ -744,7 +766,7 @@ namespace Titanium.Web.Proxy
             }
 
             // Get the listener that handles the client request.
-            endPoint.Listener.BeginAcceptTcpClient(onAcceptConnection, endPoint);
+            endPoint.Listener!.BeginAcceptSocket(onAcceptConnection, endPoint);
         }
 
 
@@ -766,27 +788,31 @@ namespace Titanium.Web.Proxy
         /// <summary>
         ///     Handle the client.
         /// </summary>
-        /// <param name="tcpClient">The client.</param>
+        /// <param name="tcpClientSocket">The client socket.</param>
         /// <param name="endPoint">The proxy endpoint.</param>
         /// <returns>The task.</returns>
-        private async Task handleClient(TcpClient tcpClient, ProxyEndPoint endPoint)
+        private async Task handleClient(Socket tcpClientSocket, ProxyEndPoint endPoint)
         {
-            tcpClient.ReceiveTimeout = ConnectionTimeOutSeconds * 1000;
-            tcpClient.SendTimeout = ConnectionTimeOutSeconds * 1000;
+            tcpClientSocket.ReceiveTimeout = ConnectionTimeOutSeconds * 1000;
+            tcpClientSocket.SendTimeout = ConnectionTimeOutSeconds * 1000;
 
-            tcpClient.LingerState = new LingerOption(true, TcpTimeWaitSeconds);
+            tcpClientSocket.LingerState = new LingerOption(true, TcpTimeWaitSeconds);
 
-            await InvokeConnectionCreateEvent(tcpClient, true);
+            await InvokeClientConnectionCreateEvent(tcpClientSocket);
 
-            using (var clientConnection = new TcpClientConnection(this, tcpClient))
+            using (var clientConnection = new TcpClientConnection(this, tcpClientSocket))
             {
-                if (endPoint is TransparentProxyEndPoint tep)
+                if (endPoint is ExplicitProxyEndPoint eep)
+                {
+                    await handleClient(eep, clientConnection);
+                }
+                else if (endPoint is TransparentProxyEndPoint tep)
                 {
                     await handleClient(tep, clientConnection);
                 }
-                else
+                else if (endPoint is SocksProxyEndPoint sep)
                 {
-                    await handleClient((ExplicitProxyEndPoint)endPoint, clientConnection);
+                    await handleClient(sep, clientConnection);
                 }
             }
         }
@@ -796,15 +822,8 @@ namespace Titanium.Web.Proxy
         /// </summary>
         /// <param name="clientStream">The client stream.</param>
         /// <param name="exception">The exception.</param>
-        private void onException(CustomBufferedStream clientStream, Exception exception)
+        private void onException(HttpClientStream clientStream, Exception exception)
         {
-#if DEBUG
-            if (clientStream is DebugCustomBufferedStream debugStream)
-            {
-                debugStream.LogException(exception);
-            }
-#endif
-
             ExceptionFunc(exception);
         }
 
@@ -813,7 +832,7 @@ namespace Titanium.Web.Proxy
         /// </summary>
         private void quitListen(ProxyEndPoint endPoint)
         {
-            endPoint.Listener.Stop();
+            endPoint.Listener!.Stop();
             endPoint.Listener.Server.Dispose();
         }
 
@@ -854,23 +873,30 @@ namespace Titanium.Web.Proxy
         }
 
         /// <summary>
-        ///     Invoke client/server tcp connection events if subscribed by API user.
+        ///     Invoke client tcp connection events if subscribed by API user.
         /// </summary>
-        /// <param name="client">The TcpClient object.</param>
-        /// <param name="isClientConnection">Is this a client connection created event? If not then we would assume that its a server connection create event.</param>
+        /// <param name="clientSocket">The TcpClient object.</param>
         /// <returns></returns>
-        internal async Task InvokeConnectionCreateEvent(TcpClient client, bool isClientConnection)
+        internal async Task InvokeClientConnectionCreateEvent(Socket clientSocket)
         {
-            //client connection created
-            if (isClientConnection && OnClientConnectionCreate != null)
+            // client connection created
+            if (OnClientConnectionCreate != null)
             {
-                await OnClientConnectionCreate.InvokeAsync(this, client, ExceptionFunc);
+                await OnClientConnectionCreate.InvokeAsync(this, clientSocket, ExceptionFunc);
             }
+        }
 
-            //server connection created
-            if (!isClientConnection && OnServerConnectionCreate != null)
+        /// <summary>
+        ///     Invoke server tcp connection events if subscribed by API user.
+        /// </summary>
+        /// <param name="serverSocket">The Socket object.</param>
+        /// <returns></returns>
+        internal async Task InvokeServerConnectionCreateEvent(Socket serverSocket)
+        {
+            // server connection created
+            if (OnServerConnectionCreate != null)
             {
-                await OnServerConnectionCreate.InvokeAsync(this, client, ExceptionFunc);
+                await OnServerConnectionCreate.InvokeAsync(this, serverSocket, ExceptionFunc);
             }
         }
 

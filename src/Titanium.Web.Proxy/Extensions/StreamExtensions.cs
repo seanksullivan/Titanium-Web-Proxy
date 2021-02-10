@@ -2,7 +2,7 @@
 using System.IO;
 using System.Threading;
 using System.Threading.Tasks;
-using StreamExtended;
+using Titanium.Web.Proxy.StreamExtended.BufferPool;
 
 namespace Titanium.Web.Proxy.Extensions
 {
@@ -18,11 +18,10 @@ namespace Titanium.Web.Proxy.Extensions
         /// <param name="output"></param>
         /// <param name="onCopy"></param>
         /// <param name="bufferPool"></param>
-        /// <param name="bufferSize"></param>
         internal static Task CopyToAsync(this Stream input, Stream output, Action<byte[], int, int> onCopy,
-            IBufferPool bufferPool, int bufferSize)
+            IBufferPool bufferPool)
         {
-            return CopyToAsync(input, output, onCopy, bufferPool, bufferSize, CancellationToken.None);
+            return CopyToAsync(input, output, onCopy, bufferPool, CancellationToken.None);
         }
 
         /// <summary>
@@ -32,20 +31,19 @@ namespace Titanium.Web.Proxy.Extensions
         /// <param name="output"></param>
         /// <param name="onCopy"></param>
         /// <param name="bufferPool"></param>
-        /// <param name="bufferSize"></param>
         /// <param name="cancellationToken"></param>
-        internal static async Task CopyToAsync(this Stream input, Stream output, Action<byte[], int, int> onCopy,
-            IBufferPool bufferPool, int bufferSize, CancellationToken cancellationToken)
+        internal static async Task CopyToAsync(this Stream input, Stream output, Action<byte[], int, int>? onCopy,
+            IBufferPool bufferPool, CancellationToken cancellationToken)
         {
-            var buffer = bufferPool.GetBuffer(bufferSize);
+            var buffer = bufferPool.GetBuffer();
             try
             {
                 while (!cancellationToken.IsCancellationRequested)
                 {
                     // cancellation is not working on Socket ReadAsync
                     // https://github.com/dotnet/corefx/issues/15033
-                    int num = await input.ReadAsync(buffer, 0, buffer.Length, CancellationToken.None)
-                        .withCancellation(cancellationToken);
+                    int num = await input.ReadAsync(buffer, 0, buffer.Length, cancellationToken)
+                        .WithCancellation(cancellationToken);
                     int bytesRead;
                     if ((bytesRead = num) != 0 && !cancellationToken.IsCancellationRequested)
                     {
@@ -64,7 +62,7 @@ namespace Titanium.Web.Proxy.Extensions
             }
         }
 
-        private static async Task<T> withCancellation<T>(this Task<T> task, CancellationToken cancellationToken)
+        internal static async Task<T> WithCancellation<T>(this Task<T> task, CancellationToken cancellationToken) where T : struct
         {
             var tcs = new TaskCompletionSource<bool>();
             using (cancellationToken.Register(s => ((TaskCompletionSource<bool>)s).TrySetResult(true), tcs))

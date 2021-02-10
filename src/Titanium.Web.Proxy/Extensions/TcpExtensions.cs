@@ -1,29 +1,9 @@
-﻿using System;
-using System.Net.Sockets;
-using System.Reflection;
+﻿using System.Net.Sockets;
 
 namespace Titanium.Web.Proxy.Extensions
 {
     internal static class TcpExtensions
     {
-        internal static void CloseSocket(this TcpClient tcpClient)
-        {
-            if (tcpClient == null)
-            {
-                return;
-            }
-
-            try
-            {
-                tcpClient.Close();
-            }
-            catch
-            {
-                // ignored
-            }
-        }
-
-
         /// <summary>
         ///     Check if a TcpClient is good to be used.
         ///     This only checks if send is working so local socket is still connected.
@@ -31,13 +11,11 @@ namespace Titanium.Web.Proxy.Extensions
         ///     So in our case we should retry with new connection from pool if first read after getting the connection fails.
         ///     https://msdn.microsoft.com/en-us/library/system.net.sockets.socket.connected(v=vs.110).aspx
         /// </summary>
-        /// <param name="client"></param>
+        /// <param name="socket"></param>
         /// <returns></returns>
-        internal static bool IsGoodConnection(this TcpClient client)
+        internal static bool IsGoodConnection(this Socket socket)
         {
-            var socket = client.Client;
-
-            if (!client.Connected || !socket.Connected)
+            if (!socket.Connected)
             {
                 return false;
             }
@@ -50,11 +28,11 @@ namespace Titanium.Web.Proxy.Extensions
 
                 socket.Blocking = false;
                 socket.Send(tmp, 0, 0);
-                //Connected.
+                // Connected.
             }
             catch
             {
-                //Should we let 10035 == WSAEWOULDBLOCK as valid connection?
+                // Should we let 10035 == WSAEWOULDBLOCK as valid connection?
                 return false;
             }
             finally

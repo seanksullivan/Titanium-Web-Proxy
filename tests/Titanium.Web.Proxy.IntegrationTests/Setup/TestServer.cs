@@ -1,19 +1,19 @@
-﻿using Microsoft.AspNetCore;
+﻿using System;
+using System.Linq;
+using System.Net;
+using System.Security.Cryptography.X509Certificates;
+using System.Threading.Tasks;
+using Microsoft.AspNetCore;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Connections;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Hosting.Server.Features;
 using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.DependencyInjection;
-using System;
-using System.Linq;
-using System.Net;
-using System.Security.Cryptography.X509Certificates;
-using System.Threading.Tasks;
 
 namespace Titanium.Web.Proxy.IntegrationTests.Setup
 {
-    //set up a kestrel test server
+    // set up a kestrel test server
     public class TestServer : IDisposable
     {
         public string ListeningHttpUrl => $"http://localhost:{HttpListeningPort}";
@@ -62,14 +62,9 @@ namespace Titanium.Web.Proxy.IntegrationTests.Setup
                         .Get<IServerAddressesFeature>()
                         .Addresses.ToArray();
 
-            string httpAddress = addresses[0];
-            HttpListeningPort = int.Parse(httpAddress.Split(':')[2]);
-
-            string httpsAddress = addresses[1];
-            HttpsListeningPort = int.Parse(httpsAddress.Split(':')[2]);
-
-            string tcpAddress = addresses[2];
-            TcpListeningPort = int.Parse(tcpAddress.Split(':')[2]);
+            HttpListeningPort = new Uri(addresses[0]).Port;
+            HttpsListeningPort = new Uri(addresses[1]).Port;
+            TcpListeningPort = new Uri(addresses[2]).Port;
         }
 
         Func<HttpContext, Task> requestHandler = null;

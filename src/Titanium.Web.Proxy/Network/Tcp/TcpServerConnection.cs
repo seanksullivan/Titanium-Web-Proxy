@@ -1,12 +1,8 @@
 ﻿using System;
 using System.Net;
-#if NETCOREAPP2_1
 using System.Net.Security;
-#endif
 using System.Net.Sockets;
 using System.Threading.Tasks;
-using StreamExtended.Network;
-using Titanium.Web.Proxy.Extensions;
 using Titanium.Web.Proxy.Helpers;
 using Titanium.Web.Proxy.Models;
 
@@ -17,19 +13,33 @@ namespace Titanium.Web.Proxy.Network.Tcp
     /// </summary>
     internal class TcpServerConnection : IDisposable
     {
-        internal TcpServerConnection(ProxyServer proxyServer, TcpClient tcpClient)
+        public Guid Id { get; } = Guid.NewGuid();
+
+        internal TcpServerConnection(ProxyServer proxyServer, Socket tcpSocket, HttpServerStream stream,
+            string hostName, int port, bool isHttps, SslApplicationProtocol negotiatedApplicationProtocol,
+            Version version, IExternalProxy? upStreamProxy, IPEndPoint? upStreamEndPoint, string cacheKey)
         {
-            this.tcpClient = tcpClient;
-            LastAccess = DateTime.Now;
+            TcpSocket = tcpSocket;
+            LastAccess = DateTime.UtcNow;
             this.proxyServer = proxyServer;
             this.proxyServer.UpdateServerConnectionCount(true);
+            Stream = stream;
+            HostName = hostName;
+            Port = port;
+            IsHttps = isHttps;
+            NegotiatedApplicationProtocol = negotiatedApplicationProtocol;
+            Version = version;
+            UpStreamProxy = upStreamProxy;
+            UpStreamEndPoint = upStreamEndPoint;
+
+            CacheKey = cacheKey;
         }
 
         private ProxyServer proxyServer { get; }
 
         internal bool IsClosed => Stream.IsClosed;
 
-        internal ExternalProxy UpStreamProxy { get; set; }
+        internal IExternalProxy? UpStreamProxy { get; set; }
 
         internal string HostName { get; set; }
 
@@ -39,34 +49,25 @@ namespace Titanium.Web.Proxy.Network.Tcp
 
         internal SslApplicationProtocol NegotiatedApplicationProtocol { get; set; }
 
-        internal bool UseUpstreamProxy { get; set; }
-
         /// <summary>
         ///     Local NIC via connection is made
         /// </summary>
-        internal IPEndPoint UpStreamEndPoint { get; set; }
+        internal IPEndPoint? UpStreamEndPoint { get; set; }
 
         /// <summary>
         ///     Http version
         /// </summary>
-        internal Version Version { get; set; }
-
-        private readonly TcpClient tcpClient;
+        internal Version Version { get; set; } = HttpHeader.VersionUnknown;
 
         /// <summary>
         /// The TcpClient.
         /// </summary>
-        internal TcpClient TcpClient => tcpClient;
+        internal Socket TcpSocket { get; }
 
         /// <summary>
         ///     Used to write lines to server
         /// </summary>
-        internal HttpRequestWriter StreamWriter { get; set; }
-
-        /// <summary>
-        ///     Server stream
-        /// </summary>
-        internal CustomBufferedStream Stream { get; set; }
+        internal HttpServerStream Stream { get; }
 
         /// <summary>
         ///     Last time this connection was used
@@ -90,13 +91,21 @@ namespace Titanium.Web.Proxy.Network.Tcp
         {
             Task.Run(async () =>
             {
-                //delay calling tcp connection close()
-                //so that server have enough time to call close first.
-                //This way we can push tcp Time_Wait to server side when possible.
+                // delay calling tcp connection close()
+                // so that server have enough time to call close first.
+                // This way we can push tcp Time_Wait to server side when possible.
                 await Task.Delay(1000);
                 proxyServer.UpdateServerConnectionCount(false);
-                Stream?.Dispose();
-                tcpClient.CloseSocket();
+                Stream.Dispose();
+
+                try
+                {
+                    TcpSocket.Close();
+                }
+                catch
+                {
+                    // ignore
+                }
             });
 
         }

@@ -1,12 +1,10 @@
 ﻿using System;
 using System.IO;
 using System.Net;
-#if NETCOREAPP2_1
 using System.Net.Security;
-#endif
 using System.Net.Sockets;
+using System.Security.Authentication;
 using System.Threading.Tasks;
-using Titanium.Web.Proxy.Extensions;
 using Titanium.Web.Proxy.Helpers;
 using Titanium.Web.Proxy.Models;
 
@@ -17,9 +15,11 @@ namespace Titanium.Web.Proxy.Network.Tcp
     /// </summary>
     internal class TcpClientConnection : IDisposable
     {
-        internal TcpClientConnection(ProxyServer proxyServer, TcpClient tcpClient)
+        public object ClientUserData { get; set; }
+
+        internal TcpClientConnection(ProxyServer proxyServer, Socket tcpClientSocket)
         {
-            this.tcpClient = tcpClient;
+            this.tcpClientSocket = tcpClientSocket;
             this.proxyServer = proxyServer;
             this.proxyServer.UpdateClientConnectionCount(true);
         }
@@ -28,19 +28,21 @@ namespace Titanium.Web.Proxy.Network.Tcp
 
         public Guid Id { get; } = Guid.NewGuid();
 
-        public EndPoint LocalEndPoint => tcpClient.Client.LocalEndPoint;
+        public EndPoint LocalEndPoint => tcpClientSocket.LocalEndPoint;
 
-        public EndPoint RemoteEndPoint => tcpClient.Client.RemoteEndPoint;
+        public EndPoint RemoteEndPoint => tcpClientSocket.RemoteEndPoint;
+
+        internal SslProtocols SslProtocol { get; set; }
 
         internal SslApplicationProtocol NegotiatedApplicationProtocol { get; set; }
 
-        private readonly TcpClient tcpClient;
+        private readonly Socket tcpClientSocket;
 
         private int? processId;
 
         public Stream GetStream()
         {
-            return tcpClient.GetStream();
+            return new NetworkStream(tcpClientSocket, true);
         }
 
         public int GetProcessId(ProxyEndPoint endPoint)
@@ -57,8 +59,7 @@ namespace Titanium.Web.Proxy.Network.Tcp
                 // If client is localhost get the process id
                 if (NetworkHelper.IsLocalIpAddress(remoteEndPoint.Address))
                 {
-                    var ipVersion = endPoint.IpV6Enabled ? IpVersion.Ipv6 : IpVersion.Ipv4;
-                    processId = TcpHelper.GetProcessIdByLocalPort(ipVersion, remoteEndPoint.Port);
+                    processId = TcpHelper.GetProcessIdByLocalPort(endPoint.IpAddress.AddressFamily, remoteEndPoint.Port);
                 }
                 else
                 {
@@ -79,14 +80,21 @@ namespace Titanium.Web.Proxy.Network.Tcp
         {
             Task.Run(async () =>
             {
-                //delay calling tcp connection close()
-                //so that client have enough time to call close first.
-                //This way we can push tcp Time_Wait to client side when possible.
+                // delay calling tcp connection close()
+                // so that client have enough time to call close first.
+                // This way we can push tcp Time_Wait to client side when possible.
                 await Task.Delay(1000);
                 proxyServer.UpdateClientConnectionCount(false);
-                tcpClient.CloseSocket();
+
+                try
+                {
+                    tcpClientSocket.Close();
+                }
+                catch
+                {
+                    // ignore
+                }
             });
-           
         }
     }
 }

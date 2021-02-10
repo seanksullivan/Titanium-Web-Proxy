@@ -1,6 +1,8 @@
 ﻿using System;
 using System.ComponentModel;
+using System.Net;
 using System.Runtime.CompilerServices;
+using Titanium.Web.Proxy.EventArguments;
 using Titanium.Web.Proxy.Examples.Wpf.Annotations;
 using Titanium.Web.Proxy.Http;
 
@@ -17,10 +19,28 @@ namespace Titanium.Web.Proxy.Examples.Wpf
         private long sentDataCount;
         private string statusCode;
         private string url;
+        private Guid clientConnectionId;
+        private Guid serverConnectionId;
 
         public int Number { get; set; }
 
+        public Guid ClientConnectionId
+        {
+            get => clientConnectionId;
+            set => SetField(ref clientConnectionId, value);
+        }
+
+        public Guid ServerConnectionId
+        {
+            get => serverConnectionId;
+            set => SetField(ref serverConnectionId, value);
+        }
+
         public HttpWebClient HttpClient { get; set; }
+
+        public IPEndPoint ClientLocalEndPoint { get; set; }
+
+        public IPEndPoint ClientRemoteEndPoint { get; set; }
 
         public bool IsTunnelConnect { get; set; }
 
@@ -120,13 +140,15 @@ namespace Titanium.Web.Proxy.Examples.Wpf
             PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(propertyName));
         }
 
-        public void Update()
+        public void Update(SessionEventArgsBase args)
         {
             var request = HttpClient.Request;
             var response = HttpClient.Response;
             int statusCode = response?.StatusCode ?? 0;
             StatusCode = statusCode == 0 ? "-" : statusCode.ToString();
             Protocol = request.RequestUri.Scheme;
+            ClientConnectionId = args.ClientConnectionId;
+            ServerConnectionId = args.ServerConnectionId;
 
             if (IsTunnelConnect)
             {

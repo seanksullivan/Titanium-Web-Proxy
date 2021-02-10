@@ -4,12 +4,11 @@ using System.IO;
 using System.Net;
 using System.Threading;
 using System.Threading.Tasks;
-using StreamExtended.Network;
-using Titanium.Web.Proxy.Compression;
 using Titanium.Web.Proxy.Helpers;
 using Titanium.Web.Proxy.Http;
 using Titanium.Web.Proxy.Http.Responses;
 using Titanium.Web.Proxy.Models;
+using Titanium.Web.Proxy.StreamExtended.Network;
 
 namespace Titanium.Web.Proxy.EventArguments
 {
@@ -21,12 +20,14 @@ namespace Titanium.Web.Proxy.EventArguments
     /// </summary>
     public class SessionEventArgs : SessionEventArgsBase
     {
-        private static readonly byte[] emptyData = new byte[0];
-
         /// <summary>
         /// Backing field for corresponding public property
         /// </summary>
         private bool reRequest;
+
+        private WebSocketDecoder? webSocketDecoderSend;
+        
+        private WebSocketDecoder? webSocketDecoderReceive;
 
         /// <summary>
         ///     Is this session a HTTP/2 promise?
@@ -36,15 +37,8 @@ namespace Titanium.Web.Proxy.EventArguments
         /// <summary>
         /// Constructor to initialize the proxy
         /// </summary>
-        internal SessionEventArgs(ProxyServer server, ProxyEndPoint endPoint,
-            CancellationTokenSource cancellationTokenSource)
-            : this(server, endPoint, null, cancellationTokenSource)
-        {
-        }
-
-        protected SessionEventArgs(ProxyServer server, ProxyEndPoint endPoint,
-            Request request, CancellationTokenSource cancellationTokenSource)
-            : base(server, endPoint, cancellationTokenSource, request)
+        internal SessionEventArgs(ProxyServer server, ProxyEndPoint endPoint, HttpClientStream clientStream, ConnectRequest? connectRequest, CancellationTokenSource cancellationTokenSource)
+            : base(server, endPoint, clientStream, connectRequest, new Request(), cancellationTokenSource)
         {
         }
 
@@ -67,20 +61,17 @@ namespace Titanium.Web.Proxy.EventArguments
             }
         }
 
+        [Obsolete("Use [WebSocketDecoderReceive] instead")]
+        public WebSocketDecoder WebSocketDecoder => WebSocketDecoderReceive;
+
+        public WebSocketDecoder WebSocketDecoderSend => webSocketDecoderSend ??= new WebSocketDecoder(BufferPool);
+        
+        public WebSocketDecoder WebSocketDecoderReceive => webSocketDecoderReceive ??= new WebSocketDecoder(BufferPool);
+
         /// <summary>
         /// Occurs when multipart request part sent.
         /// </summary>
-        public event EventHandler<MultipartRequestPartSentEventArgs> MultipartRequestPartSent;
-
-        private ICustomStreamReader getStreamReader(bool isRequest)
-        {
-            return isRequest ? ProxyClient.ClientStream : HttpClient.Connection.Stream;
-        }
-
-        private HttpWriter getStreamWriter(bool isRequest)
-        {
-            return isRequest ? (HttpWriter)ProxyClient.ClientStreamWriter : HttpClient.Connection.StreamWriter;
-        }
+        public event EventHandler<MultipartRequestPartSentEventArgs>? MultipartRequestPartSent;
 
         /// <summary>
         /// Read request body content as bytes[] for current session
@@ -105,7 +96,7 @@ namespace Titanium.Web.Proxy.EventArguments
                     request.ReadHttp2BodyTaskCompletionSource = tcs;
 
                     // signal to HTTP/2 copy frame method to continue
-                    request.ReadHttp2BeforeHandlerTaskCompletionSource.SetResult(true);
+                    request.ReadHttp2BeforeHandlerTaskCompletionSource!.SetResult(true);
 
                     await tcs.Task;
 
@@ -116,12 +107,14 @@ namespace Titanium.Web.Proxy.EventArguments
                 else
                 {
                     var body = await readBodyAsync(true, cancellationToken);
-                    request.Body = body;
+                    if (!request.BodyAvailable)
+                    {
+                        request.Body = body;
+                    }
 
                     // Now set the flag to true
                     // So that next time we can deliver body from cache
                     request.IsBodyRead = true;
-                    OnDataSent(body, 0, body.Length);
                 }
             }
         }
@@ -136,11 +129,11 @@ namespace Titanium.Web.Proxy.EventArguments
             HttpClient.Response = new Response();
         }
 
-        internal void OnMultipartRequestPartSent(string boundary, HeaderCollection headers)
+        internal void OnMultipartRequestPartSent(ReadOnlySpan<char> boundary, HeaderCollection headers)
         {
             try
             {
-                MultipartRequestPartSent?.Invoke(this, new MultipartRequestPartSentEventArgs(boundary, headers));
+                MultipartRequestPartSent?.Invoke(this, new MultipartRequestPartSentEventArgs(this, boundary.ToString(), headers));
             }
             catch (Exception ex)
             {
@@ -178,7 +171,7 @@ namespace Titanium.Web.Proxy.EventArguments
                     response.ReadHttp2BodyTaskCompletionSource = tcs;
 
                     // signal to HTTP/2 copy frame method to continue
-                    response.ReadHttp2BeforeHandlerTaskCompletionSource.SetResult(true);
+                    response.ReadHttp2BeforeHandlerTaskCompletionSource!.SetResult(true);
 
                     await tcs.Task;
 
@@ -189,33 +182,33 @@ namespace Titanium.Web.Proxy.EventArguments
                 else
                 {
                     var body = await readBodyAsync(false, cancellationToken);
-                    response.Body = body;
+                    if (!response.BodyAvailable)
+                    {
+                        response.Body = body;
+                    }
 
                     // Now set the flag to true
                     // So that next time we can deliver body from cache
                     response.IsBodyRead = true;
-                    OnDataReceived(body, 0, body.Length);
                 }
             }
         }
 
         private async Task<byte[]> readBodyAsync(bool isRequest, CancellationToken cancellationToken)
         {
-            using (var bodyStream = new MemoryStream())
+            using var bodyStream = new MemoryStream();
+            using var writer = new HttpStream(bodyStream, BufferPool, cancellationToken);
+
+            if (isRequest)
             {
-                var writer = new HttpWriter(bodyStream, BufferPool, BufferSize);
-
-                if (isRequest)
-                {
-                    await CopyRequestBodyAsync(writer, TransformationMode.Uncompress, cancellationToken);
-                }
-                else
-                {
-                    await CopyResponseBodyAsync(writer, TransformationMode.Uncompress, cancellationToken);
-                }
-
-                return bodyStream.ToArray();
+                await CopyRequestBodyAsync(writer, TransformationMode.Uncompress, cancellationToken);
             }
+            else
+            {
+                await copyResponseBodyAsync(writer, TransformationMode.Uncompress, cancellationToken);
+            }
+
+            return bodyStream.ToArray();
         }
 
         /// <summary>
@@ -233,30 +226,28 @@ namespace Titanium.Web.Proxy.EventArguments
                 return;
             }
 
-            using (var bodyStream = new MemoryStream())
-            {
-                var writer = new HttpWriter(bodyStream, BufferPool, BufferSize);
-                await copyBodyAsync(isRequest, true, writer, TransformationMode.None, null, cancellationToken);
-            }
+            var reader = isRequest ? (HttpStream)ClientStream : HttpClient.Connection.Stream;
+
+            await reader.CopyBodyAsync(requestResponse, true, NullWriter.Instance, TransformationMode.None, null, cancellationToken);
         }
 
         /// <summary>
         ///  This is called when the request is PUT/POST/PATCH to read the body
         /// </summary>
         /// <returns></returns>
-        internal async Task CopyRequestBodyAsync(HttpWriter writer, TransformationMode transformation, CancellationToken cancellationToken)
+        internal async Task CopyRequestBodyAsync(IHttpStreamWriter writer, TransformationMode transformation, CancellationToken cancellationToken)
         {
             var request = HttpClient.Request;
+            var reader = ClientStream;
 
             long contentLength = request.ContentLength;
 
             // send the request body bytes to server
             if (contentLength > 0 && hasMulipartEventSubscribers && request.IsMultipartFormData)
             {
-                var reader = getStreamReader(true);
-                string boundary = HttpHelper.GetBoundaryFromContentType(request.ContentType);
+                var boundary = HttpHelper.GetBoundaryFromContentType(request.ContentType);
 
-                using (var copyStream = new CopyStream(reader, writer, BufferPool, BufferSize))
+                using (var copyStream = new CopyStream(reader, writer, BufferPool))
                 {
                     while (contentLength > copyStream.ReadBytes)
                     {
@@ -270,7 +261,7 @@ namespace Titanium.Web.Proxy.EventArguments
                         {
                             var headers = new HeaderCollection();
                             await HeaderParser.ReadHeaders(copyStream, headers, cancellationToken);
-                            OnMultipartRequestPartSent(boundary, headers);
+                            OnMultipartRequestPartSent(boundary.Span, headers);
                         }
                     }
 
@@ -279,67 +270,24 @@ namespace Titanium.Web.Proxy.EventArguments
             }
             else
             {
-                await copyBodyAsync(true, false, writer, transformation, OnDataSent, cancellationToken);
+                await reader.CopyBodyAsync(request, false, writer, transformation, OnDataSent, cancellationToken);
             }
         }
 
-        internal async Task CopyResponseBodyAsync(HttpWriter writer, TransformationMode transformation, CancellationToken cancellationToken)
+        private async Task copyResponseBodyAsync(IHttpStreamWriter writer, TransformationMode transformation, CancellationToken cancellationToken)
         {
-            await copyBodyAsync(false, false, writer, transformation, OnDataReceived, cancellationToken);
-        }
-
-        private async Task copyBodyAsync(bool isRequest, bool useOriginalHeaderValues, HttpWriter writer, TransformationMode transformation, Action<byte[], int, int> onCopy, CancellationToken cancellationToken)
-        {
-            var stream = getStreamReader(isRequest);
-
-            var requestResponse = isRequest ? (RequestResponseBase)HttpClient.Request : HttpClient.Response;
-
-            bool isChunked = useOriginalHeaderValues? requestResponse.OriginalIsChunked : requestResponse.IsChunked;
-            long contentLength = useOriginalHeaderValues ? requestResponse.OriginalContentLength : requestResponse.ContentLength;
-
-            if (transformation == TransformationMode.None)
-            {
-                await writer.CopyBodyAsync(stream, isChunked, contentLength, onCopy, cancellationToken);
-                return;
-            }
-
-            LimitedStream limitedStream;
-            Stream decompressStream = null;
-
-            string contentEncoding = useOriginalHeaderValues ? requestResponse.OriginalContentEncoding : requestResponse.ContentEncoding;
-
-            Stream s = limitedStream = new LimitedStream(stream, BufferPool, isChunked, contentLength);
-
-            if (transformation == TransformationMode.Uncompress && contentEncoding != null)
-            {
-                s = decompressStream = DecompressionFactory.Create(contentEncoding, s);
-            }
-
-            try
-            {
-                using (var bufStream = new CustomBufferedStream(s, BufferPool, BufferSize, true))
-                {
-                    await writer.CopyBodyAsync(bufStream, false, -1, onCopy, cancellationToken);
-                }
-            }
-            finally
-            {
-                decompressStream?.Dispose();
-
-                await limitedStream.Finish();
-                limitedStream.Dispose();
-            }
+            await HttpClient.Connection.Stream.CopyBodyAsync(HttpClient.Response, false, writer, transformation, OnDataReceived, cancellationToken);
         }
 
         /// <summary>
         /// Read a line from the byte stream
         /// </summary>
         /// <returns></returns>
-        private async Task<long> readUntilBoundaryAsync(ICustomStreamReader reader, long totalBytesToRead, string boundary, CancellationToken cancellationToken)
+        private async Task<long> readUntilBoundaryAsync(ILineStream reader, long totalBytesToRead, ReadOnlyMemory<char> boundary, CancellationToken cancellationToken)
         {
             int bufferDataLength = 0;
 
-            var buffer = BufferPool.GetBuffer(BufferSize);
+            var buffer = BufferPool.GetBuffer();
             try
             {
                 int boundaryLength = boundary.Length + 4;
@@ -362,7 +310,7 @@ namespace Titanium.Web.Proxy.EventArguments
                             bool ok = true;
                             for (int i = 0; i < boundary.Length; i++)
                             {
-                                if (buffer[startIdx + i] != boundary[i])
+                                if (buffer[startIdx + i] != boundary.Span[i])
                                 {
                                     ok = false;
                                     break;
@@ -521,7 +469,20 @@ namespace Titanium.Web.Proxy.EventArguments
         /// <param name="html">HTML content to sent.</param>
         /// <param name="headers">HTTP response headers.</param>
         /// <param name="closeServerConnection">Close the server connection used by request if any?</param>
-        public void Ok(string html, Dictionary<string, HttpHeader> headers = null,
+        public void Ok(string html, IDictionary<string, HttpHeader>? headers,
+            bool closeServerConnection = false)
+        {
+            Ok(html, headers?.Values, closeServerConnection);
+        }
+
+        /// <summary>
+        /// Before request is made to server respond with the specified HTML string to client
+        /// and ignore the request. 
+        /// </summary>
+        /// <param name="html">HTML content to sent.</param>
+        /// <param name="headers">HTTP response headers.</param>
+        /// <param name="closeServerConnection">Close the server connection used by request if any?</param>
+        public void Ok(string html, IEnumerable<HttpHeader>? headers = null,
             bool closeServerConnection = false)
         {
             var response = new OkResponse();
@@ -543,7 +504,20 @@ namespace Titanium.Web.Proxy.EventArguments
         /// <param name="result">The html content bytes.</param>
         /// <param name="headers">The HTTP headers.</param>
         /// <param name="closeServerConnection">Close the server connection used by request if any?</param>
-        public void Ok(byte[] result, Dictionary<string, HttpHeader> headers = null,
+        public void Ok(byte[] result, IDictionary<string, HttpHeader>? headers,
+            bool closeServerConnection = false)
+        {
+            Ok(result, headers?.Values, closeServerConnection);
+        }
+
+        /// <summary>
+        /// Before request is made to server respond with the specified byte[] to client
+        /// and ignore the request. 
+        /// </summary>
+        /// <param name="result">The html content bytes.</param>
+        /// <param name="headers">The HTTP headers.</param>
+        /// <param name="closeServerConnection">Close the server connection used by request if any?</param>
+        public void Ok(byte[] result, IEnumerable<HttpHeader>? headers = null,
             bool closeServerConnection = false)
         {
             var response = new OkResponse();
@@ -564,7 +538,22 @@ namespace Titanium.Web.Proxy.EventArguments
         /// <param name="headers">The HTTP headers.</param>
         /// <param name="closeServerConnection">Close the server connection used by request if any?</param>
         public void GenericResponse(string html, HttpStatusCode status,
-            Dictionary<string, HttpHeader> headers = null, bool closeServerConnection = false)
+            IDictionary<string, HttpHeader>? headers, bool closeServerConnection = false)
+        {
+            GenericResponse(html, status, headers?.Values, closeServerConnection);
+        }
+
+        /// <summary>
+        /// Before request is made to server 
+        /// respond with the specified HTML string and the specified status to client.
+        /// And then ignore the request. 
+        /// </summary>
+        /// <param name="html">The html content.</param>
+        /// <param name="status">The HTTP status code.</param>
+        /// <param name="headers">The HTTP headers.</param>
+        /// <param name="closeServerConnection">Close the server connection used by request if any?</param>
+        public void GenericResponse(string html, HttpStatusCode status,
+            IEnumerable<HttpHeader>? headers = null, bool closeServerConnection = false)
         {
             var response = new GenericResponse(status);
             response.HttpVersion = HttpClient.Request.HttpVersion;
@@ -583,7 +572,21 @@ namespace Titanium.Web.Proxy.EventArguments
         /// <param name="headers">The HTTP headers.</param>
         /// <param name="closeServerConnection">Close the server connection used by request if any?</param>
         public void GenericResponse(byte[] result, HttpStatusCode status,
-            Dictionary<string, HttpHeader> headers, bool closeServerConnection = false)
+            IDictionary<string, HttpHeader> headers, bool closeServerConnection = false)
+        {
+            GenericResponse(result, status, headers?.Values, closeServerConnection);
+        }
+
+        /// <summary>
+        /// Before request is made to server respond with the specified byte[],
+        /// the specified status  to client. And then ignore the request.
+        /// </summary>
+        /// <param name="result">The bytes to sent.</param>
+        /// <param name="status">The HTTP status code.</param>
+        /// <param name="headers">The HTTP headers.</param>
+        /// <param name="closeServerConnection">Close the server connection used by request if any?</param>
+        public void GenericResponse(byte[] result, HttpStatusCode status,
+            IEnumerable<HttpHeader>? headers, bool closeServerConnection = false)
         {
             var response = new GenericResponse(status);
             response.HttpVersion = HttpClient.Request.HttpVersion;
@@ -603,7 +606,11 @@ namespace Titanium.Web.Proxy.EventArguments
             var response = new RedirectResponse();
             response.HttpVersion = HttpClient.Request.HttpVersion;
             response.Headers.AddHeader(KnownHeaders.Location, url);
-            response.Body = emptyData;
+#if NET45
+            response.Body = Net45Compatibility.EmptyArray;
+#else
+            response.Body = Array.Empty<byte>();
+#endif
 
             Respond(response, closeServerConnection);
         }
@@ -615,40 +622,39 @@ namespace Titanium.Web.Proxy.EventArguments
         /// <param name="closeServerConnection">Close the server connection used by request if any?</param>
         public void Respond(Response response, bool closeServerConnection = false)
         {
-            //request already send/ready to be sent.
+            // request already send/ready to be sent.
             if (HttpClient.Request.Locked)
             {
-                //response already received from server and ready to be sent to client.
+                // response already received from server and ready to be sent to client.
                 if (HttpClient.Response.Locked)
                 {
                     throw new Exception("You cannot call this function after response is sent to the client.");
                 }
 
-                //cleanup original response.
+                // cleanup original response.
                 if (closeServerConnection)
                 {
-                    //no need to cleanup original connection.
-                    //it will be closed any way.
+                    // no need to cleanup original connection.
+                    // it will be closed any way.
                     TerminateServerConnection();
                 }
 
                 response.SetOriginalHeaders(HttpClient.Response);
 
-                //response already received from server but not yet ready to sent to client.         
+                // response already received from server but not yet ready to sent to client.         
                 HttpClient.Response = response;
                 HttpClient.Response.Locked = true;
             }
-            //request not yet sent/not yet ready to be sent.
+            // request not yet sent/not yet ready to be sent.
             else
             {
                 HttpClient.Request.Locked = true;
                 HttpClient.Request.CancelRequest = true;
-              
-                //set new response.
+
+                // set new response.
                 HttpClient.Response = response;
                 HttpClient.Response.Locked = true;
             }
-
         }
 
         /// <summary>

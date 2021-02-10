@@ -23,7 +23,11 @@ namespace Titanium.Web.Proxy.Http2.Hpack
     public class DynamicTable
     {
         // a circular queue of header fields
-        HttpHeader[] headerFields;
+#if NET45
+        HttpHeader[] headerFields = new HttpHeader[0];
+#else
+        HttpHeader[] headerFields = Array.Empty<HttpHeader>();
+#endif
         int head;
         int tail;
 
@@ -89,10 +93,10 @@ namespace Titanium.Web.Proxy.Http2.Hpack
             int i = head - index;
             if (i < 0)
             {
-                return headerFields[i + headerFields.Length];
+                return headerFields[i + headerFields.Length]!;
             }
 
-            return headerFields[i];
+            return headerFields[i]!;
         }
 
         /// <summary>
@@ -128,7 +132,7 @@ namespace Titanium.Web.Proxy.Http2.Hpack
         /// <summary>
         /// Remove and return the oldest header field from the dynamic table.
         /// </summary>
-        public HttpHeader Remove()
+        public HttpHeader? Remove()
         {
             var removed = headerFields[tail];
             if (removed == null)
@@ -137,7 +141,7 @@ namespace Titanium.Web.Proxy.Http2.Hpack
             }
 
             Size -= removed.Size;
-            headerFields[tail++] = null;
+            headerFields[tail++] = null!;
             if (tail == headerFields.Length)
             {
                 tail = 0;
@@ -153,7 +157,7 @@ namespace Titanium.Web.Proxy.Http2.Hpack
         {
             while (tail != head)
             {
-                headerFields[tail++] = null;
+                headerFields[tail++] = null!;
                 if (tail == headerFields.Length)
                 {
                     tail = 0;
@@ -218,8 +222,8 @@ namespace Titanium.Web.Proxy.Http2.Hpack
             int cursor = tail;
             for (int i = 0; i < len; i++)
             {
-                var entry = headerFields[cursor++];
-                tmp[i] = entry;
+                var entry = headerFields![cursor++];
+                tmp[i] = entry!;
                 if (cursor == headerFields.Length)
                 {
                     cursor = 0;

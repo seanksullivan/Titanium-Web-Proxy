@@ -2,13 +2,12 @@
 using System.Collections.Generic;
 using System.Net;
 using System.Threading;
-using StreamExtended;
-using StreamExtended.Network;
 using Titanium.Web.Proxy.Helpers;
 using Titanium.Web.Proxy.Http;
 using Titanium.Web.Proxy.Models;
-using Titanium.Web.Proxy.Network;
 using Titanium.Web.Proxy.Network.Tcp;
+using Titanium.Web.Proxy.StreamExtended.BufferPool;
+using Titanium.Web.Proxy.StreamExtended.Network;
 
 namespace Titanium.Web.Proxy.EventArguments
 {
@@ -18,15 +17,28 @@ namespace Titanium.Web.Proxy.EventArguments
     ///     A proxy session ends when client terminates connection to proxy
     ///     or when server terminates connection from proxy.
     /// </summary>
-    public abstract class SessionEventArgsBase : EventArgs, IDisposable
+    public abstract class SessionEventArgsBase : ProxyEventArgsBase, IDisposable
     {
-        internal readonly CancellationTokenSource CancellationTokenSource;
-        internal TcpServerConnection ServerConnection => HttpClient.Connection;
-        internal TcpClientConnection ClientConnection => ProxyClient.Connection;
+        private static bool isWindowsAuthenticationSupported => RunTime.IsWindows;
 
-        protected readonly int BufferSize;
+        internal readonly CancellationTokenSource CancellationTokenSource;
+
+        internal TcpServerConnection ServerConnection => HttpClient.Connection;
+
+        /// <summary>
+        ///     Holds a reference to client
+        /// </summary>
+        internal TcpClientConnection ClientConnection => ClientStream.Connection;
+
+        internal HttpClientStream ClientStream { get; }
+
+        public Guid ClientConnectionId => ClientConnection.Id;
+
+        public Guid ServerConnectionId => HttpClient.HasConnection ? ServerConnection.Id : Guid.Empty;
+
         protected readonly IBufferPool BufferPool;
         protected readonly ExceptionHandler ExceptionFunc;
+        private bool enableWinAuth;
 
         /// <summary>
         /// Relative milliseconds for various events.
@@ -36,41 +48,44 @@ namespace Titanium.Web.Proxy.EventArguments
         /// <summary>
         ///     Initializes a new instance of the <see cref="SessionEventArgsBase" /> class.
         /// </summary>
-        private SessionEventArgsBase(ProxyServer server, ProxyEndPoint endPoint,
-            CancellationTokenSource cancellationTokenSource)
+        private protected SessionEventArgsBase(ProxyServer server, ProxyEndPoint endPoint,
+            HttpClientStream clientStream, ConnectRequest? connectRequest, Request request, CancellationTokenSource cancellationTokenSource) : base(clientStream.Connection)
         {
-            BufferSize = server.BufferSize;
             BufferPool = server.BufferPool;
             ExceptionFunc = server.ExceptionFunc;
-            TimeLine["Session Created"] = DateTime.Now;
-        }
+            TimeLine["Session Created"] = DateTime.UtcNow;
 
-        protected SessionEventArgsBase(ProxyServer server, ProxyEndPoint endPoint,
-            CancellationTokenSource cancellationTokenSource,
-            Request request) : this(server, endPoint, cancellationTokenSource)
-        {
             CancellationTokenSource = cancellationTokenSource;
 
-            ProxyClient = new ProxyClient();
-            HttpClient = new HttpWebClient(request);
-            LocalEndPoint = endPoint;
-
-            HttpClient.ProcessId = new Lazy<int>(() => ProxyClient.Connection.GetProcessId(endPoint));
+            ClientStream = clientStream;
+            HttpClient = new HttpWebClient(connectRequest, request, new Lazy<int>(() => clientStream.Connection.GetProcessId(endPoint)));
+            ProxyEndPoint = endPoint;
+            EnableWinAuth = server.EnableWinAuth && isWindowsAuthenticationSupported;
         }
-
-        /// <summary>
-        ///     Holds a reference to client
-        /// </summary>
-        internal ProxyClient ProxyClient { get; }
 
         /// <summary>
         ///     Returns a user data for this request/response session which is
         ///     same as the user data of HttpClient.
         /// </summary>
-        public object UserData
+        public object? UserData
         {
             get => HttpClient.UserData;
             set => HttpClient.UserData = value;
+        }
+
+        /// <summary>
+        ///     Enable/disable Windows Authentication (NTLM/Kerberos) for the current session.
+        /// </summary>
+        public bool EnableWinAuth
+        {
+            get => enableWinAuth;
+            set
+            {
+                if (value && !isWindowsAuthenticationSupported)
+                    throw new Exception("Windows Authentication is not supported");
+
+                enableWinAuth = value;
+            }
         }
 
         /// <summary>
@@ -79,9 +94,17 @@ namespace Titanium.Web.Proxy.EventArguments
         public bool IsHttps => HttpClient.Request.IsHttps;
 
         /// <summary>
-        ///     Client End Point.
+        ///     Client Local End Point.
         /// </summary>
-        public IPEndPoint ClientEndPoint => (IPEndPoint)ProxyClient.Connection.RemoteEndPoint;
+        public IPEndPoint ClientLocalEndPoint => (IPEndPoint)ClientConnection.LocalEndPoint;
+
+        /// <summary>
+        ///     Client Remote End Point.
+        /// </summary>
+        public IPEndPoint ClientRemoteEndPoint => (IPEndPoint)ClientConnection.RemoteEndPoint;
+
+        [Obsolete("Use ClientRemoteEndPoint instead.")]
+        public IPEndPoint ClientEndPoint => ClientRemoteEndPoint;
 
         /// <summary>
         ///    The web client used to communicate with server for this session.
@@ -92,24 +115,40 @@ namespace Titanium.Web.Proxy.EventArguments
         public HttpWebClient WebSession => HttpClient;
 
         /// <summary>
+        ///     Gets or sets the custom up stream proxy.
+        /// </summary>
+        /// <value>
+        ///     The custom up stream proxy.
+        /// </value>
+        public IExternalProxy? CustomUpStreamProxy { get; set; }
+
+        /// <summary>
         ///     Are we using a custom upstream HTTP(S) proxy?
         /// </summary>
-        public ExternalProxy CustomUpStreamProxyUsed { get; internal set; }
+        public IExternalProxy? CustomUpStreamProxyUsed { get; internal set; }
 
         /// <summary>
         ///     Local endpoint via which we make the request.
         /// </summary>
-        public ProxyEndPoint LocalEndPoint { get; }
+        public ProxyEndPoint ProxyEndPoint { get; }
+
+        [Obsolete("Use ProxyEndPoint instead.")]
+        public ProxyEndPoint LocalEndPoint => ProxyEndPoint;
 
         /// <summary>
         ///     Is this a transparent endpoint?
         /// </summary>
-        public bool IsTransparent => LocalEndPoint is TransparentProxyEndPoint;
+        public bool IsTransparent => ProxyEndPoint is TransparentProxyEndPoint;
+
+        /// <summary>
+        ///     Is this a SOCKS endpoint?
+        /// </summary>
+        public bool IsSocks => ProxyEndPoint is SocksProxyEndPoint;
 
         /// <summary>
         ///     The last exception that happened.
         /// </summary>
-        public Exception Exception { get; internal set; }
+        public Exception? Exception { get; internal set; }
 
         /// <summary>
         ///     Implements cleanup here.
@@ -128,12 +167,12 @@ namespace Titanium.Web.Proxy.EventArguments
         /// <summary>
         ///     Fired when data is sent within this session to server/client.
         /// </summary>
-        public event EventHandler<DataEventArgs> DataSent;
+        public event EventHandler<DataEventArgs>? DataSent;
 
         /// <summary>
         ///     Fired when data is received within this session from client/server.
         /// </summary>
-        public event EventHandler<DataEventArgs> DataReceived;
+        public event EventHandler<DataEventArgs>? DataReceived;
 
         internal void OnDataSent(byte[] buffer, int offset, int count)
         {

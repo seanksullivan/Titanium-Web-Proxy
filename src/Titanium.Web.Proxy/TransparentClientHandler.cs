@@ -1,5 +1,4 @@
 ﻿using System;
-using System.Collections.Generic;
 using System.IO;
 using System.Net.Security;
 using System.Net.Sockets;
@@ -7,14 +6,13 @@ using System.Security.Authentication;
 using System.Security.Cryptography.X509Certificates;
 using System.Threading;
 using System.Threading.Tasks;
-using StreamExtended;
-using StreamExtended.Network;
 using Titanium.Web.Proxy.EventArguments;
 using Titanium.Web.Proxy.Exceptions;
 using Titanium.Web.Proxy.Extensions;
 using Titanium.Web.Proxy.Helpers;
 using Titanium.Web.Proxy.Models;
 using Titanium.Web.Proxy.Network.Tcp;
+using Titanium.Web.Proxy.StreamExtended;
 
 namespace Titanium.Web.Proxy
 {
@@ -27,31 +25,28 @@ namespace Titanium.Web.Proxy
         /// <param name="endPoint">The transparent endpoint.</param>
         /// <param name="clientConnection">The client connection.</param>
         /// <returns></returns>
-        private async Task handleClient(TransparentProxyEndPoint endPoint, TcpClientConnection clientConnection)
+        private Task handleClient(TransparentProxyEndPoint endPoint, TcpClientConnection clientConnection)
         {
             var cancellationTokenSource = new CancellationTokenSource();
             var cancellationToken = cancellationTokenSource.Token;
+            return handleClient(endPoint, clientConnection, endPoint.Port, cancellationTokenSource, cancellationToken);
+        }
 
-            var clientStream = new CustomBufferedStream(clientConnection.GetStream(), BufferPool, BufferSize);
-            var clientStreamWriter = new HttpResponseWriter(clientStream, BufferPool, BufferSize);
-
-            SslStream sslStream = null;
+        private async Task handleClient(TransparentBaseProxyEndPoint endPoint, TcpClientConnection clientConnection,
+            int port, CancellationTokenSource cancellationTokenSource, CancellationToken cancellationToken)
+        {
+            bool isHttps = false;
+            var clientStream = new HttpClientStream(clientConnection, clientConnection.GetStream(), BufferPool, cancellationToken);
 
             try
             {
                 var clientHelloInfo = await SslTools.PeekClientHello(clientStream, BufferPool, cancellationToken);
 
-                bool isHttps = clientHelloInfo != null;
-                string httpsHostName = null;
-
-                if (isHttps)
+                if (clientHelloInfo != null)
                 {
-                    httpsHostName = clientHelloInfo.GetServerName() ?? endPoint.GenericCertificateName;
+                    var httpsHostName = clientHelloInfo.GetServerName() ?? endPoint.GenericCertificateName;
 
-                    var args = new BeforeSslAuthenticateEventArgs(cancellationTokenSource)
-                    {
-                        SniHostName = httpsHostName
-                    };
+                    var args = new BeforeSslAuthenticateEventArgs(clientConnection, cancellationTokenSource, httpsHostName);
 
                     await endPoint.InvokeBeforeSslAuthenticate(this, args, ExceptionFunc);
 
@@ -62,61 +57,58 @@ namespace Titanium.Web.Proxy
 
                     if (endPoint.DecryptSsl && args.DecryptSsl)
                     {
+                        clientStream.Connection.SslProtocol = clientHelloInfo.SslProtocol;
 
-                        //do client authentication using certificate
-                        X509Certificate2 certificate = null;
+                        // do client authentication using certificate
+                        X509Certificate2? certificate = null;
+                        SslStream? sslStream = null;
                         try
                         {
-                            sslStream = new SslStream(clientStream, true);
+                            sslStream = new SslStream(clientStream, false);
 
                             string certName = HttpHelper.GetWildCardDomainName(httpsHostName);
                             certificate = endPoint.GenericCertificate ??
                                                     await CertificateManager.CreateServerCertificate(certName);
 
                             // Successfully managed to authenticate the client using the certificate
-                            await sslStream.AuthenticateAsServerAsync(certificate, false, SslProtocols.Tls, false);
+                            await sslStream.AuthenticateAsServerAsync(certificate, false, SslProtocols.Tls12, false);
 
                             // HTTPS server created - we can now decrypt the client's traffic
-                            clientStream = new CustomBufferedStream(sslStream, BufferPool, BufferSize);
-
-                            clientStreamWriter = new HttpResponseWriter(clientStream, BufferPool, BufferSize);
+                            clientStream = new HttpClientStream(clientStream.Connection, sslStream, BufferPool, cancellationToken);
+                            sslStream = null; // clientStream was created, no need to keep SSL stream reference
+                            isHttps = true;
                         }
                         catch (Exception e)
                         {
-                            var certname = certificate?.GetNameInfo(X509NameType.SimpleName, false);
-                            var session = new SessionEventArgs(this, endPoint, cancellationTokenSource)
-                            {
-                                ProxyClient = { Connection = clientConnection },
-                                HttpClient = { ConnectRequest = null }
-                            };
+                            sslStream?.Dispose();
+
+                            var certName = certificate?.GetNameInfo(X509NameType.SimpleName, false);
+                            var session = new SessionEventArgs(this, endPoint, clientStream, null, cancellationTokenSource);
                             throw new ProxyConnectException(
-                                $"Couldn't authenticate host '{httpsHostName}' with certificate '{certname}'.", e, session);
+                                $"Couldn't authenticate host '{httpsHostName}' with certificate '{certName}'.", e, session);
                         }
-                      
                     }
                     else
                     {
-                        var connection = await tcpConnectionFactory.GetServerConnection(httpsHostName, endPoint.Port,
-                                    httpVersion: null, isHttps: false, applicationProtocols: null,
-                                    isConnect: true, proxyServer: this, session:null, upStreamEndPoint: UpStreamEndPoint,
-                                    externalProxy: UpStreamHttpsProxy, noCache: true, cancellationToken: cancellationToken);
+                        var sessionArgs = new SessionEventArgs(this, endPoint, clientStream, null, cancellationTokenSource);
+                        var connection = (await tcpConnectionFactory.GetServerConnection(this, httpsHostName, port,
+                                    HttpHeader.VersionUnknown, false, null,
+                                    true, sessionArgs, UpStreamEndPoint,
+                                    UpStreamHttpsProxy, true, false, cancellationToken))!;
 
                         try
                         {
-                            CustomBufferedStream serverStream = null;
                             int available = clientStream.Available;
 
                             if (available > 0)
                             {
                                 // send the buffered data
-                                var data = BufferPool.GetBuffer(BufferSize);
+                                var data = BufferPool.GetBuffer();
                                 try
                                 {
                                     // clientStream.Available should be at most BufferSize because it is using the same buffer size
                                     await clientStream.ReadAsync(data, 0, available, cancellationToken);
-                                    serverStream = connection.Stream;
-                                    await serverStream.WriteAsync(data, 0, available, cancellationToken);
-                                    await serverStream.FlushAsync(cancellationToken);
+                                    await connection.Stream.WriteAsync(data, 0, available, true, cancellationToken);
                                 }
                                 finally
                                 {
@@ -124,8 +116,11 @@ namespace Titanium.Web.Proxy
                                 }
                             }
 
-                            await TcpHelper.SendRaw(clientStream, serverStream, BufferPool, BufferSize,
-                                null, null, cancellationTokenSource, ExceptionFunc);
+                            if (!clientStream.IsClosed && !connection.Stream.IsClosed)
+                            {
+                                await TcpHelper.SendRaw(clientStream, connection.Stream, BufferPool,
+                                    null, null, cancellationTokenSource, ExceptionFunc);
+                            }
                         }
                         finally
                         {
@@ -135,10 +130,10 @@ namespace Titanium.Web.Proxy
                         return;
                     }
                 }
+
                 // HTTPS server created - we can now decrypt the client's traffic
                 // Now create the request
-                await handleHttpSessionRequest(endPoint, clientConnection, clientStream, clientStreamWriter,
-                    cancellationTokenSource, isHttps ? httpsHostName : null, null, null);
+                await handleHttpSessionRequest(endPoint, clientStream, cancellationTokenSource, isHttps: isHttps);
             }
             catch (ProxyException e)
             {
@@ -158,13 +153,7 @@ namespace Titanium.Web.Proxy
             }
             finally
             {
-                sslStream?.Dispose();
                 clientStream.Dispose();
-               
-                if (!cancellationTokenSource.IsCancellationRequested)
-                {
-                    cancellationTokenSource.Cancel();
-                }
             }
         }
     }

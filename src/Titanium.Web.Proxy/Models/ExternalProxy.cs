@@ -6,14 +6,14 @@ namespace Titanium.Web.Proxy.Models
     /// <summary>
     ///     An upstream proxy this proxy uses if any.
     /// </summary>
-    public class ExternalProxy
+    public class ExternalProxy : IExternalProxy
     {
         private static readonly Lazy<NetworkCredential> defaultCredentials =
             new Lazy<NetworkCredential>(() => CredentialCache.DefaultNetworkCredentials);
 
-        private string password;
+        private string? password;
 
-        private string userName;
+        private string? userName;
 
         /// <summary>
         ///     Use default windows credentials?
@@ -25,10 +25,14 @@ namespace Titanium.Web.Proxy.Models
         /// </summary>
         public bool BypassLocalhost { get; set; }
 
+        public ExternalProxyType ProxyType { get; set; }
+
+        public bool ProxyDnsRequests { get; set; }
+
         /// <summary>
         ///     Username.
         /// </summary>
-        public string UserName
+        public string? UserName
         {
             get => UseDefaultCredentials ? defaultCredentials.Value.UserName : userName;
             set
@@ -45,7 +49,7 @@ namespace Titanium.Web.Proxy.Models
         /// <summary>
         ///     Password.
         /// </summary>
-        public string Password
+        public string? Password
         {
             get => UseDefaultCredentials ? defaultCredentials.Value.Password : password;
             set
@@ -62,7 +66,7 @@ namespace Titanium.Web.Proxy.Models
         /// <summary>
         ///     Host name.
         /// </summary>
-        public string HostName { get; set; }
+        public string HostName { get; set; } = string.Empty;
 
         /// <summary>
         ///     Port.
@@ -70,12 +74,36 @@ namespace Titanium.Web.Proxy.Models
         public int Port { get; set; }
 
         /// <summary>
-        /// Get cache key for Tcp connection cache.
+        ///     Initializes a new instance of the <see cref="ExternalProxy"/> class.
         /// </summary>
-        /// <returns></returns>
-        internal string GetCacheKey()
+        public ExternalProxy()
         {
-            return $"{HostName}-{Port}" + (UseDefaultCredentials ? $"-{UserName}-{Password}" : string.Empty);
+        }
+
+        /// <summary>
+        ///     Initializes a new instance of the <see cref="ExternalProxy"/> class.
+        /// </summary>
+        /// <param name="hostName">Name of the host.</param>
+        /// <param name="port">The port.</param>
+        public ExternalProxy(string hostName, int port)
+        {
+            HostName = hostName;
+            Port = port;
+        }
+
+        /// <summary>
+        ///     Initializes a new instance of the <see cref="ExternalProxy"/> class.
+        /// </summary>
+        /// <param name="hostName">Name of the host.</param>
+        /// <param name="port">The port.</param>
+        /// <param name="userName">Name of the user.</param>
+        /// <param name="password">The password.</param>
+        public ExternalProxy(string hostName, int port, string userName, string password)
+        {
+            HostName = hostName;
+            Port = port;
+            UserName = userName;
+            Password = password;
         }
 
         /// <summary>
@@ -86,6 +114,17 @@ namespace Titanium.Web.Proxy.Models
         {
             return $"{HostName}:{Port}";
         }
+    }
 
+    public enum ExternalProxyType
+    {
+        /// <summary>A HTTP/HTTPS proxy server.</summary>
+        Http,
+
+        /// <summary>A SOCKS4[A] proxy server.</summary>
+        Socks4,
+
+        /// <summary>A SOCKS5 proxy server.</summary>
+        Socks5
     }
 }
